@@ -1,6 +1,7 @@
 package keyfile
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -25,6 +26,18 @@ const (
 	Base64
 )
 
+// valid reports whether e is one of the encodings this package knows. Encoding is an
+// exported int, so keyfile.Encoding(cfg.someID) is reachable with a bad value; letting one
+// through would mint a key under an encoding encode() can't spell consistently, and once
+// data is sealed under it every later read of the mismatched file is refused permanently.
+func (e Encoding) valid() bool {
+	switch e {
+	case Hex, Raw, Base64:
+		return true
+	}
+	return false
+}
+
 func (e Encoding) decode(b []byte) ([]byte, error) {
 	switch e {
 	case Raw:
@@ -37,14 +50,18 @@ func (e Encoding) decode(b []byte) ([]byte, error) {
 	return nil, fmt.Errorf("keyfile: unknown encoding %d", int(e))
 }
 
+// encode must only be called with a valid Encoding — callers check that once, up front, so
+// this never has to reconcile a disagreement with decode's error return.
 func (e Encoding) encode(key []byte) []byte {
 	switch e {
 	case Raw:
-		return key
+		return bytes.Clone(key)
 	case Base64:
 		return []byte(base64.StdEncoding.EncodeToString(key) + "\n")
-	default:
+	case Hex:
 		return []byte(hex.EncodeToString(key) + "\n")
+	default:
+		panic(fmt.Sprintf("keyfile: unknown encoding %d", int(e)))
 	}
 }
 

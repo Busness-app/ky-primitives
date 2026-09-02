@@ -171,3 +171,56 @@ func TestFromEnvValidatesLikeAFile(t *testing.T) {
 		}
 	})
 }
+
+// The hex file format is 64 lowercase hex characters and exactly one trailing newline.
+// Pinned here because it changed once already (the pre-encoding code wrote no newline)
+// without anyone saying so; this stops it drifting again unnoticed.
+func TestHexFileFormat(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k")
+	key, err := keyfile.LoadOrCreate(path, 32)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	onDisk, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := hex.EncodeToString(key) + "\n"
+	if string(onDisk) != want {
+		t.Fatalf("on-disk hex file = %q, want %q", onDisk, want)
+	}
+	if len(onDisk) != 65 {
+		t.Fatalf("on-disk hex file is %d bytes, want 65 (64 hex chars + newline)", len(onDisk))
+	}
+	if onDisk[64] != '\n' {
+		t.Fatalf("on-disk hex file does not end with a newline: %q", onDisk[64])
+	}
+
+	again, err := keyfile.Load(path, 32)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !bytes.Equal(again, key) {
+		t.Error("round trip through the pinned format returned a different key")
+	}
+}
+
+// An out-of-range Encoding must fail loudly on first boot rather than writing a key under
+// an encoding encode() and decode() disagree about — that disagreement used to make the
+// package permanently refuse the very file it had just written, orphaning whatever the
+// caller sealed under the returned key.
+func TestUnknownEncodingIsRejectedNotBricked(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k")
+	bad := keyfile.Encoding(99)
+
+	if _, err := keyfile.LoadOrCreateEncoded(path, 32, bad); err == nil {
+		t.Fatal("an unknown encoding was accepted")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("an unknown encoding still wrote a key file")
+	}
+
+	if _, err := keyfile.LoadEncoded(path, 32, bad); err == nil {
+		t.Fatal("LoadEncoded accepted an unknown encoding")
+	}
+}

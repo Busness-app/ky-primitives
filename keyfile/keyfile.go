@@ -58,6 +58,9 @@ func LoadOrCreateEncoded(path string, size int, enc Encoding) ([]byte, error) {
 	if size < minSize {
 		return nil, fmt.Errorf("keyfile: size %d is below the %d-byte floor", size, minSize)
 	}
+	if !enc.valid() {
+		return nil, fmt.Errorf("keyfile: unknown encoding %d", int(enc))
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -96,6 +99,9 @@ func Load(path string, size int) ([]byte, error) {
 func LoadEncoded(path string, size int, enc Encoding) ([]byte, error) {
 	if size < minSize {
 		return nil, fmt.Errorf("keyfile: size %d is below the %d-byte floor", size, minSize)
+	}
+	if !enc.valid() {
+		return nil, fmt.Errorf("keyfile: unknown encoding %d", int(enc))
 	}
 	return read(path, size, enc)
 }
@@ -140,6 +146,13 @@ func read(path string, size int, enc Encoding) ([]byte, error) {
 	}
 	key, err := enc.decode(raw)
 	if err != nil {
+		if enc == Hex {
+			// hex.InvalidByteError prints the offending byte. For a raw key misread as
+			// hex, that byte is almost always byte 0 of the actual secret — keep this
+			// message content-free so it never ends up in a startup log.
+			return nil, fmt.Errorf("%w: %s: not hex", ErrUnreadable, path)
+		}
+		// base64.CorruptInputError is positional only; it carries no key content.
 		return nil, fmt.Errorf("%w: %s: %w", ErrUnreadable, path, err)
 	}
 	if len(key) != size {
