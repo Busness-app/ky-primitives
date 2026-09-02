@@ -360,7 +360,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Consumes: `Manifest` from Task 2.
 - Produces: `func Open(raw, key []byte, targetDir string) (Manifest, []File, error)` — **a breaking change**, deliberately. Every later task and every consumer uses this three-value form.
 
-**This task is where the downstream job earns its place.** Changing `Open`'s signature breaks gridlock, which is the only consumer in the job's list. Open a `feat/capsule-manifest` branch in gridlock too, and the job pairs them. If the job goes red and stays red, Task 1 is not finished.
+**This task is where the downstream job earns its place.** Changing `Open`'s signature breaks gridlock, which is the only consumer in the job's list. The job pairs on `github.head_ref` — the **ky-primitives** branch name — so gridlock's branch must also be `feat/library-readiness`. A differently-named consumer branch is simply not found, which `ls-remote` reports as exit 2, which the job correctly reads as "no pair" before falling back to the consumer's default — and that default does not compile against this change. If the job goes red and stays red, Task 1 is not finished.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -458,13 +458,22 @@ Expected: PASS.
 
 ```bash
 cd /home/yoshi/busness.app/gridlock-server
-git checkout -b feat/capsule-manifest
+git checkout -b feat/library-readiness
 ```
+
+The branch name matches this repo's, because that is what the pairing keys on.
 
 In `internal/backup/capsule.go`, delete the manifest workaround at lines 71-76 — the
 re-`json.Unmarshal` of sealed `raw` into a locally-declared struct — and take the manifest
-from `Seal`'s counterpart on the read path instead. Update the `kycapsule.Open` call at
-line 97 to the three-value form.
+from the library instead. Update the `kycapsule.Open` call at line 97 to the three-value
+form.
+
+`ExtractCapsule` returns `(kycapsule.Manifest, []BackupFile, error)`, and `drill.go` reads
+`VerificationRecipe` off that returned `Manifest` local. Do **not** store the authenticated
+manifest back into `Capsule.Manifest`: that field is typed `UnverifiedManifest`, so writing
+to it downgrades the value and puts a verification-rule decision back on data the type system
+has stopped vouching for. Returning it keeps the compiler in the loop and removes a silent
+mutation of the caller's `*Capsule`.
 
 Run: `go build ./... && go test ./...`
 Expected: PASS.
@@ -1968,7 +1977,7 @@ added above has no test behind it, either write the test or delete the sentence.
 Clone gridlock's **paired branch**, not its default — the default branch has not taken
 Task 3's `Open` change, so checking it would either fail spuriously or pass vacuously.
 
-Run: `cd /tmp && rm -rf tagprobe && mkdir tagprobe && cd tagprobe && git clone --depth 1 -b feat/capsule-manifest /home/yoshi/busness.app/gridlock-server && cd gridlock-server && go mod edit -replace github.com/Busness-app/ky-primitives=/home/yoshi/busness.app/ky-primitives && go build ./... && go test -count=1 ./...`
+Run: `cd /tmp && rm -rf tagprobe && mkdir tagprobe && cd tagprobe && git clone --depth 1 -b feat/library-readiness /home/yoshi/busness.app/gridlock-server && cd gridlock-server && go mod edit -replace github.com/Busness-app/ky-primitives=/home/yoshi/busness.app/ky-primitives && go build ./... && go test -count=1 ./...`
 Expected: PASS. Do not tag until it does.
 
 - [ ] **Step 5: Commit and tag**
@@ -2013,7 +2022,7 @@ was written and the process died before the anchor was saved. Under the current 
 
 ```bash
 cd /home/yoshi/busness.app/kybookmarks-server
-git checkout -b fix/auditchain-v2
+git checkout -b feat/library-readiness
 go mod edit -replace github.com/Busness-app/ky-primitives=/home/yoshi/busness.app/ky-primitives
 go build ./... 2>&1 | head
 ```
@@ -2226,7 +2235,7 @@ files and delete the code.
 
 ```bash
 cd /home/yoshi/busness.app/kypassword-server
-git checkout -b fix/auditchain-v2
+git checkout -b feat/library-readiness
 go mod edit -replace github.com/Busness-app/ky-primitives=/home/yoshi/busness.app/ky-primitives
 go build ./... 2>&1 | head
 sed -n '100,135p;160,200p;280,350p' internal/audit/audit.go
