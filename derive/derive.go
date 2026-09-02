@@ -21,7 +21,83 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 )
+
+// ErrBusy reports that too many stretches are already running. Callers should answer 503
+// and must not spend a lockout strike: this is the server saying "not now", not the user
+// getting the password wrong.
+var ErrBusy = errors.New("derive: too many concurrent derivations")
+
+// ponytail: fixed budget and wait. Make them configurable if a deployment needs a
+// different ceiling.
+const (
+	// maxConcurrent bounds how many stretches run at once.
+	//
+	// MaxIterations bounds one call, which is not admission control: a burst all asking
+	// for the ceiling occupies every core for as long as it takes, and everything sharing
+	// the process waits behind it. The iteration count comes from a client or a stored
+	// record, so the expensive number is the caller's to choose and the concurrency is
+	// ours. PBKDF2 is single-threaded, so a slot really is a core.
+	maxConcurrent = 4
+	maxWait       = 2 * time.Second
+)
+
+// slots is the admission queue. A plain buffered channel is the whole mechanism: there is
+// one resource here, unlike password, where memory and lanes have to be taken together.
+var slots = make(chan struct{}, maxConcurrent)
+
+var meter struct {
+	mu   sync.Mutex
+	held int64
+	peak int64
+}
+
+// acquire takes a slot or reports ErrBusy after maxWait.
+func acquire() error {
+	timer := time.NewTimer(maxWait)
+	defer timer.Stop()
+	select {
+	case slots <- struct{}{}:
+		meter.mu.Lock()
+		meter.held++
+		if meter.held > meter.peak {
+			meter.peak = meter.held
+		}
+		meter.mu.Unlock()
+		return nil
+	case <-timer.C:
+		return ErrBusy
+	}
+}
+
+func release() {
+	meter.mu.Lock()
+	meter.held--
+	meter.mu.Unlock()
+	<-slots
+}
+
+// peakInFlight, inFlight and resetPeak exist for the admission test, which cannot observe
+// a ceiling it has no way to measure.
+func peakInFlight() int64 {
+	meter.mu.Lock()
+	defer meter.mu.Unlock()
+	return meter.peak
+}
+
+func inFlight() int64 {
+	meter.mu.Lock()
+	defer meter.mu.Unlock()
+	return meter.held
+}
+
+func resetPeak() {
+	meter.mu.Lock()
+	defer meter.mu.Unlock()
+	meter.peak = 0
+}
 
 const (
 	// MinIterations and MaxIterations bound a value that arrives from a client or a
@@ -54,7 +130,13 @@ func AuthSecret(password, saltBase64 string, iterations int, label string) (stri
 		return "", fmt.Errorf("derive: salt is %d bytes, want %d-%d", len(salt), minSaltBytes, maxSaltBytes)
 	}
 
+	// Admission is taken after validation and around the stretch alone: a call refused
+	// for a bad salt should not have occupied a slot to find that out.
+	if err := acquire(); err != nil {
+		return "", err
+	}
 	stretched, err := pbkdf2.Key(sha256.New, password, salt, iterations, keyBytes)
+	release()
 	if err != nil {
 		return "", fmt.Errorf("derive: %w", err)
 	}

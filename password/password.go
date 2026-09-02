@@ -82,7 +82,7 @@ var (
 	ErrMalformed = errors.New("password: stored hash is not a valid argon2id PHC string")
 )
 
-// ponytail: fixed budget and wait. Make them configurable if a deployment needs a
+// ponytail: fixed budgets and wait. Make them configurable if a deployment needs a
 // different ceiling.
 const (
 	// budgetKiB is the total memory all concurrent derivations may reserve, equal to
@@ -94,33 +94,55 @@ const (
 	// comment claimed 256 MiB. Reserving p.Memory makes the number here the number
 	// enforced.
 	budgetKiB = 4 * 64 * 1024
-	maxWait   = 2 * time.Second
+
+	// budgetLanes is the same four derivations counted in Argon2 lanes.
+	//
+	// Memory alone was not admission control. A stored hash at the 8 MiB floor reserves a
+	// thirty-second of the byte budget, so 32 of them run at once, and each may ask for
+	// maxThreads lanes and maxTime iterations: 512 lanes on a machine with a handful of
+	// cores, all of it under the advertised memory ceiling. CPU was written off as
+	// degrading rather than killing, which is true of one derivation and false of the
+	// fleet a byte budget admits — and Verify takes these parameters from the stored hash,
+	// so whoever can write the store chooses them.
+	budgetLanes = 4 * defaultThreads
+
+	maxWait = 2 * time.Second
 )
 
-// Memory is what OOM-kills a process, so it is what the budget counts. Time and Threads
-// cost CPU, which degrades rather than kills, and the wait below sheds that.
+// Two dimensions, one queue. Memory is what OOM-kills a process and lanes are what starve
+// the scheduler; reserving them under the same serialised acquirer is what keeps two
+// half-satisfied waiters from holding each other's remainder.
 var budget = struct {
-	admit chan struct{} // capacity 1: one acquirer negotiates at a time
-	wake  chan struct{} // poked on release
-	mu    sync.Mutex
-	free  int64
-	peak  int64
+	admit     chan struct{} // capacity 1: one acquirer negotiates at a time
+	wake      chan struct{} // poked on release
+	mu        sync.Mutex
+	free      int64
+	peak      int64
+	freeLanes int64
+	peakL     int64
 }{
-	admit: make(chan struct{}, 1),
-	wake:  make(chan struct{}, 1),
-	free:  budgetKiB,
+	admit:     make(chan struct{}, 1),
+	wake:      make(chan struct{}, 1),
+	free:      budgetKiB,
+	freeLanes: budgetLanes,
 }
 
-// withMemory runs fn holding a reservation of kib, or reports ErrBusy.
+// withBudget runs fn holding a reservation of kib and lanes, or reports ErrBusy.
 //
 // Reservations are serialised through admit so that no two acquirers can each hold part of
-// what the other needs, which is the deadlock a naive multi-token semaphore has. It also
-// makes the queue first-come rather than letting small requests starve a large one. Only
-// the reservation is serialised; the derivation itself runs outside the queue.
-func withMemory(kib int64, fn func()) error {
+// what the other needs, which is the deadlock a naive multi-token semaphore has. That
+// argument is what lets a second dimension be added for free: both are taken under the
+// same single acquirer, so there is still no pair of waiters holding each other's
+// remainder. It also makes the queue first-come rather than letting small requests starve
+// a large one. Only the reservation is serialised; the derivation itself runs outside the
+// queue.
+func withBudget(kib, lanes int64, fn func()) error {
+	// Unsatisfiable however long we wait, so say so now rather than after maxWait.
 	if kib > budgetKiB {
-		// Unsatisfiable however long we wait, so say so now rather than after maxWait.
 		return fmt.Errorf("%w: needs %d KiB, the whole budget is %d KiB", ErrBusy, kib, budgetKiB)
+	}
+	if lanes > budgetLanes {
+		return fmt.Errorf("%w: needs %d lanes, the whole budget is %d", ErrBusy, lanes, budgetLanes)
 	}
 	timer := time.NewTimer(maxWait)
 	defer timer.Stop()
@@ -141,17 +163,23 @@ func withMemory(kib int64, fn func()) error {
 
 	for {
 		budget.mu.Lock()
-		if budget.free >= kib {
+		// Both or neither: taking memory while waiting for lanes would reintroduce the
+		// partial hold the single queue exists to prevent.
+		if budget.free >= kib && budget.freeLanes >= lanes {
 			budget.free -= kib
+			budget.freeLanes -= lanes
 			if used := budgetKiB - budget.free; used > budget.peak {
 				budget.peak = used
+			}
+			if used := budgetLanes - budget.freeLanes; used > budget.peakL {
+				budget.peakL = used
 			}
 			budget.mu.Unlock()
 			// Admit is the queue, not the reservation. Deriving while holding it capped
 			// the package at one derivation at a time whatever the budget allowed, and
 			// left the wait below unreachable.
 			leaveQueue()
-			defer releaseMemory(kib)
+			defer release(kib, lanes)
 			fn()
 			return nil
 		}
@@ -165,10 +193,11 @@ func withMemory(kib int64, fn func()) error {
 	}
 }
 
-// releaseMemory returns a reservation and wakes whoever is queued behind it.
-func releaseMemory(kib int64) {
+// release returns a reservation and wakes whoever is queued behind it.
+func release(kib, lanes int64) {
 	budget.mu.Lock()
 	budget.free += kib
+	budget.freeLanes += lanes
 	budget.mu.Unlock()
 	select {
 	case budget.wake <- struct{}{}:
@@ -190,10 +219,22 @@ func inFlight() int64 {
 	return budgetKiB - budget.free
 }
 
+func peakLanes() int64 {
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	return budget.peakL
+}
+
+func lanesInFlight() int64 {
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	return budgetLanes - budget.freeLanes
+}
+
 func resetPeak() {
 	budget.mu.Lock()
 	defer budget.mu.Unlock()
-	budget.peak = 0
+	budget.peak, budget.peakL = 0, 0
 }
 
 // Hash derives a PHC-encoded Argon2id hash at the current parameters.
@@ -213,7 +254,7 @@ func hashWith(plaintext string, p Params) (string, error) {
 		return "", fmt.Errorf("password: %w", err)
 	}
 	var key []byte
-	if err := withMemory(int64(p.Memory), func() {
+	if err := withBudget(int64(p.Memory), int64(p.Threads), func() {
 		key = argon2.IDKey([]byte(plaintext), salt, p.Time, p.Memory, p.Threads, keyBytes)
 	}); err != nil {
 		return "", err
@@ -231,7 +272,7 @@ func Verify(plaintext, encoded string) (bool, error) {
 		return false, err
 	}
 	var got []byte
-	if err := withMemory(int64(p.Memory), func() {
+	if err := withBudget(int64(p.Memory), int64(p.Threads), func() {
 		got = argon2.IDKey([]byte(plaintext), salt, p.Time, p.Memory, p.Threads, uint32(len(want)))
 	}); err != nil {
 		return false, err
