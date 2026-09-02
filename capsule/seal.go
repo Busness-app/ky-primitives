@@ -52,6 +52,17 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 
 	sum := sha256.Sum256(payload)
 
+	entries := make([]FileEntry, 0, len(files))
+	for _, f := range files {
+		fsum := sha256.Sum256(f.Content)
+		entries = append(entries, FileEntry{
+			Path: f.Path,
+			Size: int64(len(f.Content)),
+			Sum:  hex.EncodeToString(fsum[:]),
+			Mode: f.Mode,
+		})
+	}
+
 	now := time.Now().UTC()
 	// Marshalled once, then used twice: these bytes are the AAD and they are what lands
 	// in the container. Deriving the AAD from a second encoding of the same struct would
@@ -64,6 +75,7 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 		PayloadHash:        hex.EncodeToString(sum[:]),
 		Threshold:          threshold,
 		TotalShares:        totalShares,
+		Files:              entries,
 		Dependencies:       deps,
 		VerificationRecipe: recipe,
 	})

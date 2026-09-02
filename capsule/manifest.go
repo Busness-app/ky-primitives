@@ -3,8 +3,27 @@ package capsule
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"time"
 )
+
+// FileEntry describes one member of the payload. The digest lets a restore say which file
+// is wrong; the payload hash only says that one of them is.
+type FileEntry struct {
+	Path string      `json:"path"`
+	Size int64       `json:"size_bytes"`
+	Sum  string      `json:"sha256"`
+	Mode os.FileMode `json:"mode"`
+}
+
+// Dependency is one thing a service needs that is not in the capsule — an environment
+// variable, a port, a peer. A restore that produces every file and none of these produces
+// a service that does not start, so they are recorded rather than remembered.
+type Dependency struct {
+	Kind  string `json:"kind"`
+	Name  string `json:"name"`
+	Value string `json:"value,omitempty"`
+}
 
 // UnverifiedManifest is a capsule's manifest read without its key.
 //
@@ -19,13 +38,14 @@ import (
 // that chooses a restore path, a quorum, or a verification rule wants Manifest, which only
 // a successful Open can produce.
 type UnverifiedManifest struct {
-	CapsuleID   string    `json:"capsule_id"`
-	ServiceName string    `json:"service_name"`
-	AppVersion  string    `json:"app_version"`
-	CreatedAt   time.Time `json:"created_at"`
-	PayloadHash string    `json:"payload_hash"`
-	Threshold   int       `json:"threshold"`
-	TotalShares int       `json:"total_shares"`
+	CapsuleID   string      `json:"capsule_id"`
+	ServiceName string      `json:"service_name"`
+	AppVersion  string      `json:"app_version"`
+	CreatedAt   time.Time   `json:"created_at"`
+	PayloadHash string      `json:"payload_hash"`
+	Threshold   int         `json:"threshold"`
+	TotalShares int         `json:"total_shares"`
+	Files       []FileEntry `json:"files,omitempty"`
 
 	Dependencies       any `json:"dependencies,omitempty"`
 	VerificationRecipe any `json:"verification_recipe,omitempty"`

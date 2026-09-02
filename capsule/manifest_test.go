@@ -76,3 +76,38 @@ func TestUnverifiedManifestIsRewritableWithoutTheKey(t *testing.T) {
 		t.Fatal("Open accepted a rewritten manifest")
 	}
 }
+
+func TestManifestRecordsEveryFile(t *testing.T) {
+	files := []capsule.File{
+		{Path: "db.sqlite", Content: []byte("payload"), Mode: 0o600},
+		{Path: "keys/signing.key", Content: []byte("secret"), Mode: 0o400},
+	}
+	raw, key, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 2, 3)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	m, _, err := capsule.Open(raw, key, "")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if len(m.Files) != 2 {
+		t.Fatalf("Files = %d entries, want 2", len(m.Files))
+	}
+
+	// sha256("payload"), computed independently of this package.
+	const wantSum = "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5"
+	byPath := map[string]capsule.FileEntry{}
+	for _, e := range m.Files {
+		byPath[e.Path] = e
+	}
+	got := byPath["db.sqlite"]
+	if got.Sum != wantSum {
+		t.Errorf("db.sqlite Sum = %q, want %q", got.Sum, wantSum)
+	}
+	if got.Size != 7 {
+		t.Errorf("db.sqlite Size = %d, want 7", got.Size)
+	}
+	if byPath["keys/signing.key"].Mode != 0o400 {
+		t.Errorf("signing.key Mode = %v, want 0400", byPath["keys/signing.key"].Mode)
+	}
+}
