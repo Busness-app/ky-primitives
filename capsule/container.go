@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"time"
 )
 
 // KycapFileFormat identifies the one container this package reads and writes.
@@ -33,19 +32,9 @@ const maxManifestBytes = 1 << 20
 // room for base64 expansion, the manifest and archive framing.
 const maxContainerBytes = 384 << 20
 
-// manifest is the capsule's description of itself. Every field of it is authenticated.
-type manifest struct {
-	CapsuleID   string    `json:"capsule_id"`
-	ServiceName string    `json:"service_name"`
-	AppVersion  string    `json:"app_version"`
-	CreatedAt   time.Time `json:"created_at"`
-	PayloadHash string    `json:"payload_hash"`
-	Threshold   int       `json:"threshold"`
-	TotalShares int       `json:"total_shares"`
-
-	Dependencies       any `json:"dependencies,omitempty"`
-	VerificationRecipe any `json:"verification_recipe,omitempty"`
-}
+// manifest is the authenticated description of a capsule. It is carried and authenticated
+// as the exact bytes that were read, never a re-encoding of this struct — see kycapFile.
+type manifest = UnverifiedManifest
 
 // kycapFile is the JSON container.
 //
@@ -61,31 +50,44 @@ type kycapFile struct {
 	Ciphertext string          `json:"ciphertext"`
 }
 
-// decryptPayload parses the container, decrypts it under the manifest, and returns the
-// hash-verified gzipped tar payload.
-func decryptPayload(raw, key []byte) ([]byte, error) {
+// parseContainer parses the container envelope and bounds every attacker-controlled part of
+// it before anything downstream can act on it. decryptPayload calls this with bytes it will
+// decrypt under a key; ReadUnverifiedManifest calls it with bytes from a caller who has no
+// key at all and so no other defence — both need the same limits, and a second copy of any
+// of them is how it stops matching the first.
+func parseContainer(raw []byte) (kycapFile, error) {
 	if err := checkContainerSize("container", len(raw)); err != nil {
-		return nil, err
+		return kycapFile{}, err
 	}
 	if len(bytes.TrimLeft(raw, " \t\r\n")) == 0 {
-		return nil, ErrUnknownContainer
+		return kycapFile{}, ErrUnknownContainer
 	}
 
 	var cf kycapFile
 	if err := json.Unmarshal(raw, &cf); err != nil {
-		return nil, fmt.Errorf("%w: not readable as %s: %v", ErrUnknownContainer, KycapFileFormat, err)
+		return kycapFile{}, fmt.Errorf("%w: not readable as %s: %v", ErrUnknownContainer, KycapFileFormat, err)
 	}
 	if cf.Format != KycapFileFormat {
-		return nil, fmt.Errorf("%w: unsupported capsule format %q", ErrUnknownContainer, cf.Format)
+		return kycapFile{}, fmt.Errorf("%w: unsupported capsule format %q", ErrUnknownContainer, cf.Format)
+	}
+	if err := checkContainerSize("encoded ciphertext", len(cf.Ciphertext)); err != nil {
+		return kycapFile{}, err
+	}
+	if len(cf.Manifest) > maxManifestBytes {
+		return kycapFile{}, fmt.Errorf("%w: manifest is %d bytes", ErrCorruptCapsule, len(cf.Manifest))
+	}
+	return cf, nil
+}
+
+// decryptPayload parses the container, decrypts it under the manifest, and returns the
+// hash-verified gzipped tar payload.
+func decryptPayload(raw, key []byte) ([]byte, error) {
+	cf, err := parseContainer(raw)
+	if err != nil {
+		return nil, err
 	}
 	if cf.Ciphertext == "" {
 		return nil, fmt.Errorf("%w: container carries no ciphertext", ErrCorruptCapsule)
-	}
-	if err := checkContainerSize("encoded ciphertext", len(cf.Ciphertext)); err != nil {
-		return nil, err
-	}
-	if len(cf.Manifest) > maxManifestBytes {
-		return nil, fmt.Errorf("%w: manifest is %d bytes", ErrCorruptCapsule, len(cf.Manifest))
 	}
 	var m manifest
 	if err := json.Unmarshal(cf.Manifest, &m); err != nil {
