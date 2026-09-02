@@ -85,8 +85,11 @@ var (
 // ponytail: fixed budgets and wait. Make them configurable if a deployment needs a
 // different ceiling.
 const (
-	// budgetKiB is the total memory all concurrent derivations may reserve, equal to
-	// four derivations at the default 64 MiB.
+	// budgetKiB is the total memory all concurrent request-driven derivations may
+	// reserve, equal to four derivations at the default 64 MiB. One exception: the
+	// once-per-process dummy mint in dummyHash bypasses this budget entirely, so the
+	// process can transiently run one 64 MiB derivation beyond it — once, ever. See
+	// dummyHash for why.
 	//
 	// It is a byte budget rather than a slot count because slots bound how many
 	// derivations run, not how large they are, and Verify accepts a stored hash asking
@@ -245,9 +248,9 @@ func Hash(plaintext string) (string, error) {
 const dummyPlaintext = "dummy verification plaintext"
 
 // dummyHashMu guards dummyHashValue, a mutex-guarded memo rather than sync.OnceValue: a
-// OnceValue that panics caches the panic and re-raises it on every later call forever. A
-// mint failure here must not outlive the call that hit it, so on error the value is left
-// unset and the next call tries again.
+// OnceValue that panics caches the panic and re-raises it on every later call forever. If
+// dummyMint ever panics, the assignment below never completes, so dummyHashValue stays
+// unset and the next call retries — nothing here caches a failure.
 var (
 	dummyHashMu    sync.Mutex
 	dummyHashValue string
@@ -264,17 +267,9 @@ var (
 func dummyHash() string {
 	dummyHashMu.Lock()
 	defer dummyHashMu.Unlock()
-	if dummyHashValue != "" {
-		return dummyHashValue
+	if dummyHashValue == "" {
+		dummyHashValue = dummyMint()
 	}
-	h, err := dummyMint()
-	if err != nil {
-		// Unreachable except a broken RNG: dummyMint takes no budget path, so ErrBusy
-		// cannot reach here. Not cached — dummyHashValue stays unset, so the next call
-		// retries rather than re-raising this forever.
-		panic("password: cannot mint the dummy hash: " + err.Error())
-	}
-	dummyHashValue = h
 	return dummyHashValue
 }
 
@@ -326,14 +321,16 @@ func hashWith(plaintext string, p Params) (string, error) {
 
 // dummyMint derives the dummy hash at the current default parameters without acquiring the
 // budget. See dummyHash for why: this runs once per process, not once per request.
-func dummyMint() (string, error) {
+//
+// No error return: crypto/rand.Read cannot produce a non-nil error on this module's Go
+// floor (1.26.6) without already having crashed the process via runtime.fatal (broken
+// entropy source, since Go 1.24) — there is no error state left for a caller to handle.
+func dummyMint() string {
 	p := DefaultParams()
 	salt := make([]byte, saltBytes)
-	if _, err := rand.Read(salt); err != nil {
-		return "", fmt.Errorf("password: %w", err)
-	}
+	_, _ = rand.Read(salt)
 	key := argon2.IDKey([]byte(dummyPlaintext), salt, p.Time, p.Memory, p.Threads, keyBytes)
-	return encode(p, salt, key), nil
+	return encode(p, salt, key)
 }
 
 // encode renders the PHC string for a derived key at p.
