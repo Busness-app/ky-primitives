@@ -112,6 +112,16 @@ const (
 	maxWait = 2 * time.Second
 )
 
+// MaxMemoryKiB and MaxLanes are the two dimensions of this package's derivation budget,
+// taken together under one acquirer so two waiters can never each hold part of what the
+// other needs. They are exported so a product running derive as well can add the two
+// budgets up rather than assume one of them is the whole story. Memory is in KiB, matching
+// Params.Memory and every other memory value in this package.
+const (
+	MaxMemoryKiB = budgetKiB
+	MaxLanes     = budgetLanes
+)
+
 // Two dimensions, one queue. Memory is what OOM-kills a process and lanes are what starve
 // the scheduler; reserving them under the same serialised acquirer is what keeps two
 // half-satisfied waiters from holding each other's remainder.

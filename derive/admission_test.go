@@ -36,8 +36,8 @@ func TestConcurrentDerivationsAreAdmittedNotJustBounded(t *testing.T) {
 	}
 	wg.Wait()
 
-	if peak := peakInFlight(); peak > maxConcurrent {
-		t.Fatalf("%d derivations ran at once, the budget is %d", peak, maxConcurrent)
+	if peak := peakInFlight(); peak > MaxConcurrent {
+		t.Fatalf("%d derivations ran at once, the budget is %d", peak, MaxConcurrent)
 	}
 	if peakInFlight() == 0 {
 		t.Fatal("no derivation was recorded, so this test proves nothing")

@@ -12,6 +12,7 @@
 package derive
 
 import (
+	"context"
 	"crypto/hkdf"
 	"crypto/hmac"
 	"crypto/pbkdf2"
@@ -33,20 +34,27 @@ var ErrBusy = errors.New("derive: too many concurrent derivations")
 // ponytail: fixed budget and wait. Make them configurable if a deployment needs a
 // different ceiling.
 const (
-	// maxConcurrent bounds how many stretches run at once.
+	// MaxConcurrent bounds how many stretches run at once.
 	//
 	// MaxIterations bounds one call, which is not admission control: a burst all asking
 	// for the ceiling occupies every core for as long as it takes, and everything sharing
 	// the process waits behind it. The iteration count comes from a client or a stored
 	// record, so the expensive number is the caller's to choose and the concurrency is
 	// ours. PBKDF2 is single-threaded, so a slot really is a core.
-	maxConcurrent = 4
+	//
+	// This budget is separate from password's, and deliberately: this package is
+	// standard-library-only, and importing password would pull x/crypto into it. The two
+	// also bound different resources — slots of CPU here, bytes and lanes of memory
+	// there. A product adopting both is spending MaxConcurrent cores plus
+	// password.MaxMemoryKiB of memory across password.MaxLanes lanes; add them up
+	// against the box before deciding either is safe.
+	MaxConcurrent = 4
 	maxWait       = 2 * time.Second
 )
 
 // slots is the admission queue. A plain buffered channel is the whole mechanism: there is
 // one resource here, unlike password, where memory and lanes have to be taken together.
-var slots = make(chan struct{}, maxConcurrent)
+var slots = make(chan struct{}, MaxConcurrent)
 
 var meter struct {
 	mu   sync.Mutex
@@ -54,8 +62,13 @@ var meter struct {
 	peak int64
 }
 
-// acquire takes a slot or reports ErrBusy after maxWait.
-func acquire() error {
+// acquire takes a slot or reports ErrBusy after maxWait. A context already done when
+// acquire is called is refused before it queues at all, so a caller who has already gone
+// cannot take a slot ahead of one still waiting.
+func acquire(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	timer := time.NewTimer(maxWait)
 	defer timer.Stop()
 	select {
@@ -69,6 +82,8 @@ func acquire() error {
 		return nil
 	case <-timer.C:
 		return ErrBusy
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -113,9 +128,12 @@ const (
 	maxSaltBytes = 64
 )
 
-// AuthSecret derives the hex login secret for a password, a base64 salt and an iteration
-// count, separated by label.
-func AuthSecret(password, saltBase64 string, iterations int, label string) (string, error) {
+// AuthSecretContext is AuthSecret, bounded by a context.
+//
+// The context governs the wait for a derivation slot, not the derivation: PBKDF2 at these
+// iteration counts is not interruptible, so a cancellation during the stretch itself is
+// noticed when it finishes.
+func AuthSecretContext(ctx context.Context, password, saltBase64 string, iterations int, label string) (string, error) {
 	if label == "" {
 		return "", errors.New("derive: label is required, it is the domain separation")
 	}
@@ -132,7 +150,7 @@ func AuthSecret(password, saltBase64 string, iterations int, label string) (stri
 
 	// Admission is taken after validation and around the stretch alone: a call refused
 	// for a bad salt should not have occupied a slot to find that out.
-	if err := acquire(); err != nil {
+	if err := acquire(ctx); err != nil {
 		return "", err
 	}
 	stretched, err := pbkdf2.Key(sha256.New, password, salt, iterations, keyBytes)
@@ -145,6 +163,12 @@ func AuthSecret(password, saltBase64 string, iterations int, label string) (stri
 		return "", fmt.Errorf("derive: %w", err)
 	}
 	return hex.EncodeToString(out), nil
+}
+
+// AuthSecret is AuthSecretContext without a deadline of its own. It derives the hex login
+// secret for a password, a base64 salt and an iteration count, separated by label.
+func AuthSecret(password, saltBase64 string, iterations int, label string) (string, error) {
+	return AuthSecretContext(context.Background(), password, saltBase64, iterations, label)
 }
 
 // MinSyntheticKeyBytes is the floor for the key behind a synthetic salt.
