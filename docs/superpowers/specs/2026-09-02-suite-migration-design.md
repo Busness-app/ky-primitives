@@ -111,7 +111,7 @@ repos into the same library reproduces that workaround eight more times.
 | Gap | Needed by | Shape |
 |---|---|---|
 | No manifest accessor | gridlock, kysignon, kyrecovery | Export the manifest type and a `Manifest(raw []byte) (Manifest, error)` that reads it **without a key**. kyrecovery has six keyless manifest reads driving TUI quorum display, `diff.CompareManifests` and drill path selection. |
-| No in-memory `Open` | ky_server_base, kyrecovery | `Open` requires a non-empty `targetDir`. `ExtractCapsule(…, "")` meaning "decode, write nothing" has no successor. |
+| ~~No in-memory `Open`~~ | — | **Not a gap.** Verified by running it: `Open(raw, key, "")` returns the files and writes nothing. The survey was wrong. |
 | No streaming container | kyrecovery | `stream.go` is a **third container** (`version:2`, `payload.stream.enc`, 1 MiB chunks, per-chunk nonce and AAD) that the README's retirement table does not mention. Multi-GB database capsules have no path forward through `Seal([]File)`. |
 | No per-file digest or declared size | kyrecovery | `File{Path,Content,Mode}` cannot reproduce the per-file SHA-256 verification at `capsule.go:287-297`. Needs `Sum` and `Size` on `File`, or an equivalent. |
 | No `Dependency` / `FileEntry` types | kyrecovery | Three interface signatures depend on them: `adapter.VerifyRestore`, `diff.CompareManifests`, `export.KitData`. |
@@ -159,11 +159,14 @@ change at rollout. It goes in release notes.
 
 ### recoverycode
 
-`MatchCode(code, digests, hash func(string) string)` appears not to fit kypost, which needs
-a `ctx` per comparison for slot admission, a `(bool, error)` per comparison so `ErrBusy`
-aborts, and short-circuits on first match deliberately (`users.go:1838-1842`: "deriving
-against them anyway would make a correct code the most expensive request"). At ten codes
-× Argon2id-64 MiB, a non-short-circuiting scan is a per-request denial of service.
+`MatchCode(code, digests, hash func(string) string)` appears not to fit kypost, which
+short-circuits on first match deliberately (`users.go:1838-1842`: "deriving against them
+anyway would make a correct code the most expensive request"). At ten codes × Argon2id-64
+MiB, a non-short-circuiting scan is a per-request denial of service.
+
+(The survey also reported a format mismatch here. It was wrong: verified by running it,
+`recoverycode.Generate(3)` returns `["fu25-msqo-s531" …]` — already `xxxx-xxxx-xxxx`,
+already kypost's shape.)
 
 **Decision: the conflict is a symptom, and the fix is in kypost's storage, not the API.**
 `MatchCode` scans every entry so the *position* of the match does not leak through response
@@ -371,7 +374,7 @@ is correct and it is a behaviour change.
 ## Phase 7 — kypost-server
 
 **Adopts:** `derive` (AuthSecret and SyntheticSalt), `totp`, `recoverycode`, `password`,
-`keyfile`.
+`keyfile`. `recoverycode` is a drop-in on format — only the storage change below applies.
 **Does not adopt:** `auditchain`, `capsule`, `shamir`.
 
 `internal/totp` is a near-exact clone of the library's — same arithmetic, same
