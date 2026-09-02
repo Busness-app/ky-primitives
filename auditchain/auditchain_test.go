@@ -2,6 +2,7 @@ package auditchain
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -20,7 +21,7 @@ func build(t *testing.T, rows ...[]string) []Record {
 	}
 	var out []Record
 	for _, fields := range rows {
-		rec, err := c.Append(discard, fields...)
+		rec, err := c.Append(context.Background(), discard, fields...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -127,11 +128,12 @@ func TestVerifyRejectsAnAppendedForgery(t *testing.T) {
 
 func TestResumeContinuesAnExistingChain(t *testing.T) {
 	first := build(t, []string{"a"}, []string{"b"})
-	c, err := Resume(key, first[len(first)-1])
+	last := first[len(first)-1]
+	c, err := Resume(key, last, Anchor{Count: last.Seq, Hash: last.Hash})
 	if err != nil {
 		t.Fatal(err)
 	}
-	third, err := c.Append(discard, "c")
+	third, err := c.Append(context.Background(), discard, "c")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +159,7 @@ func TestAnchorTracksTheChain(t *testing.T) {
 	if got := c.Anchor(); got.Count != 0 {
 		t.Fatalf("fresh chain anchor is %+v", got)
 	}
-	rec, err := c.Append(discard, "a")
+	rec, err := c.Append(context.Background(), discard, "a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +246,7 @@ func generatedChain(n int) func(func(Record, error) bool) {
 			return
 		}
 		for i := 0; i < n; i++ {
-			rec, err := c.Append(discard, "event")
+			rec, err := c.Append(context.Background(), discard, "event")
 			if err != nil {
 				yield(Record{}, err)
 				return

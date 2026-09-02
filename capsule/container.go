@@ -1,28 +1,34 @@
 package capsule
 
 import (
-	"archive/tar"
 	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"time"
 )
 
-// KycapFileFormat identifies the JSON container this package writes.
-const KycapFileFormat = "kycap/1"
+// KycapFileFormat identifies the one container this package reads and writes.
+//
+// It is kycap/2. Two containers came before it and both are gone: kysignon-server's
+// kycap/1 and kyrecovery-server's tar of manifest.json, nonce.bin and payload.enc. Each
+// authenticated its ciphertext and left the manifest outside the AEAD — kycap/1 entirely,
+// the tar container everything but its own aad string — so capsule_id, service_name,
+// threshold, total_shares and the verification recipe could all be rewritten by someone
+// who never learned the key. A 2-of-3 kit could be restated as 1-of-1 and still open.
+//
+// Reading them was retired rather than kept, because neither server needs its old capsules
+// read and a reader that half-trusts a manifest cannot tell a caller which half.
+const KycapFileFormat = "kycap/2"
 
-// maxContainerBytes bounds the tar container walk. The container holds three small
-// members; anything larger is either corrupt or hostile.
-const maxContainerBytes = int64(8 << 30)
+// maxManifestBytes bounds the manifest before it is parsed. A manifest is a few hundred
+// bytes of JSON; a megabyte of it is already absurd.
+const maxManifestBytes = 1 << 20
 
-// manifest carries the fields both containers agree on. Each container has extra fields
-// of its own, but only these are needed to decrypt and verify.
+// manifest is the capsule's description of itself. Every field of it is authenticated.
 type manifest struct {
 	CapsuleID   string    `json:"capsule_id"`
 	ServiceName string    `json:"service_name"`
@@ -31,41 +37,32 @@ type manifest struct {
 	PayloadHash string    `json:"payload_hash"`
 	Threshold   int       `json:"threshold"`
 	TotalShares int       `json:"total_shares"`
-	AAD         string    `json:"aad"`
 
 	Dependencies       any `json:"dependencies,omitempty"`
 	VerificationRecipe any `json:"verification_recipe,omitempty"`
 }
 
-// kycapFile is the kycap/1 JSON container.
+// kycapFile is the JSON container.
+//
+// Manifest is kept as raw bytes rather than a decoded struct because those exact bytes are
+// the additional authenticated data. Re-encoding a decoded manifest to rebuild the AAD
+// would have to reproduce the writer's spelling byte for byte — field order, number
+// formatting, the interface{} shape of dependencies — and any drift there fails every
+// capsule rather than any forgery. The bytes that were read are the bytes that are
+// authenticated.
 type kycapFile struct {
-	Format     string   `json:"format"`
-	Manifest   manifest `json:"manifest"`
-	Ciphertext string   `json:"ciphertext"`
+	Format     string          `json:"format"`
+	Manifest   json.RawMessage `json:"manifest"`
+	Ciphertext string          `json:"ciphertext"`
 }
 
-// decryptPayload dispatches on container type and returns the decrypted, hash-verified
-// gzipped tar payload.
-//
-// Dispatch is on the first byte, which is decisive: the JSON container always begins with
-// '{', and a tar archive always begins with a member name, which cannot be '{' because
-// safeRelPath-worthy names never are and a leading brace would make the header's checksum
-// field land on non-numeric bytes. A wrong guess costs nothing — the chosen parser fails
-// and the caller sees ErrUnknownContainer rather than a silent misread.
+// decryptPayload parses the container, decrypts it under the manifest, and returns the
+// hash-verified gzipped tar payload.
 func decryptPayload(raw, key []byte) ([]byte, error) {
-	trimmed := bytes.TrimLeft(raw, " \t\r\n")
-	if len(trimmed) == 0 {
+	if len(bytes.TrimLeft(raw, " \t\r\n")) == 0 {
 		return nil, ErrUnknownContainer
 	}
-	if trimmed[0] == '{' {
-		return decryptKycap1(trimmed, key)
-	}
-	return decryptTarContainer(raw, key)
-}
 
-// decryptKycap1 reads kysignon-server's JSON container: nonce prefixed to the ciphertext,
-// no additional authenticated data.
-func decryptKycap1(raw, key []byte) ([]byte, error) {
 	var cf kycapFile
 	if err := json.Unmarshal(raw, &cf); err != nil {
 		return nil, fmt.Errorf("%w: not readable as %s: %v", ErrUnknownContainer, KycapFileFormat, err)
@@ -75,6 +72,13 @@ func decryptKycap1(raw, key []byte) ([]byte, error) {
 	}
 	if cf.Ciphertext == "" {
 		return nil, fmt.Errorf("%w: container carries no ciphertext", ErrCorruptCapsule)
+	}
+	if len(cf.Manifest) > maxManifestBytes {
+		return nil, fmt.Errorf("%w: manifest is %d bytes", ErrCorruptCapsule, len(cf.Manifest))
+	}
+	var m manifest
+	if err := json.Unmarshal(cf.Manifest, &m); err != nil {
+		return nil, fmt.Errorf("%w: unreadable manifest: %v", ErrCorruptCapsule, err)
 	}
 
 	sealed, err := DecodeCiphertext(cf.Ciphertext)
@@ -91,64 +95,9 @@ func decryptKycap1(raw, key []byte) ([]byte, error) {
 	}
 	nonce, ct := sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():]
 
-	payload, err := gcm.Open(nil, nonce, ct, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt capsule: %w", err)
-	}
-	return payload, verifyPayloadHash(payload, cf.Manifest.PayloadHash)
-}
-
-// decryptTarContainer reads kyrecovery-server's tar container: nonce in its own member,
-// and the manifest's aad field bound into the AEAD.
-func decryptTarContainer(raw, key []byte) ([]byte, error) {
-	var manifestBytes, nonce, sealed []byte
-
-	tr := tar.NewReader(bytes.NewReader(raw))
-	for {
-		hdr, err := tr.Next()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrUnknownContainer, err)
-		}
-		data, err := io.ReadAll(io.LimitReader(tr, maxContainerBytes))
-		if err != nil {
-			return nil, err
-		}
-		switch hdr.Name {
-		case "manifest.json":
-			manifestBytes = data
-		case "nonce.bin":
-			nonce = data
-		case "payload.enc":
-			sealed = data
-		}
-	}
-
-	switch {
-	case len(manifestBytes) == 0:
-		return nil, fmt.Errorf("%w: tar container has no manifest.json", ErrCorruptCapsule)
-	case len(nonce) == 0:
-		return nil, fmt.Errorf("%w: tar container has no nonce.bin", ErrCorruptCapsule)
-	case len(sealed) == 0:
-		return nil, fmt.Errorf("%w: tar container has no payload.enc", ErrCorruptCapsule)
-	}
-
-	var m manifest
-	if err := json.Unmarshal(manifestBytes, &m); err != nil {
-		return nil, fmt.Errorf("%w: unreadable manifest: %v", ErrCorruptCapsule, err)
-	}
-
-	gcm, err := newGCM(key)
-	if err != nil {
-		return nil, err
-	}
-	if len(nonce) != gcm.NonceSize() {
-		return nil, fmt.Errorf("%w: nonce is %d bytes, expected %d", ErrCorruptCapsule, len(nonce), gcm.NonceSize())
-	}
-
-	payload, err := gcm.Open(nil, nonce, sealed, []byte(m.AAD))
+	// The manifest is the additional authenticated data, so any edit to it fails here
+	// rather than being handed to the caller as fact.
+	payload, err := gcm.Open(nil, nonce, ct, cf.Manifest)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt capsule: %w", err)
 	}

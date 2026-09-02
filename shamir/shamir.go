@@ -18,7 +18,6 @@ package shamir
 import (
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -32,7 +31,16 @@ import (
 // suite's 0x11d implementations byte-indistinguishable from one of these, and combining
 // across the two returns a different secret with no error at all. The tag is what turns
 // that into a refusal.
-const Version = "ky1"
+const Version = "ky2"
+
+// setIDBytes is the width of a set identifier.
+//
+// 128 bits, because a collision means the check the field exists for silently does not
+// happen. The first version of this format carried 32, which reached even odds of a
+// collision after about 65,000 splits — a number a deployment issuing recovery kits
+// actually reaches. That version is not parsed: nothing outside this package ever wrote a
+// share, so there are no cards to strand.
+const setIDBytes = 16
 
 var (
 	// ErrNotEnoughShares reports fewer shares than the threshold the shares themselves
@@ -61,7 +69,7 @@ var (
 // answer: too few shares, and shares from two different splits.
 type Share struct {
 	Threshold int
-	SetID     uint32
+	SetID     [setIDBytes]byte
 	Index     byte
 	Value     []byte
 }
@@ -80,7 +88,7 @@ func (s Share) String() string {
 func (s Share) body() string {
 	return Version +
 		"-" + strconv.Itoa(s.Threshold) +
-		"-" + fmt.Sprintf("%08x", s.SetID) +
+		"-" + hex.EncodeToString(s.SetID[:]) +
 		"-" + strconv.Itoa(int(s.Index)) +
 		"-" + hex.EncodeToString(s.Value)
 }
@@ -111,10 +119,12 @@ func ParseShare(encoded string) (Share, error) {
 	if err != nil || threshold < 2 || threshold > 255 {
 		return Share{}, fmt.Errorf("%w: threshold %q", ErrMalformedShare, parts[1])
 	}
-	setID, err := strconv.ParseUint(parts[2], 16, 32)
-	if err != nil || len(parts[2]) != 8 {
+	var setID [setIDBytes]byte
+	idBytes, err := hex.DecodeString(parts[2])
+	if err != nil || len(idBytes) != setIDBytes {
 		return Share{}, fmt.Errorf("%w: set id %q", ErrMalformedShare, parts[2])
 	}
+	copy(setID[:], idBytes)
 	index, err := strconv.Atoi(parts[3])
 	if err != nil {
 		return Share{}, fmt.Errorf("%w: %v", ErrMalformedShare, err)
@@ -129,7 +139,7 @@ func ParseShare(encoded string) (Share, error) {
 	if len(value) == 0 {
 		return Share{}, ErrShareLength
 	}
-	return Share{Threshold: threshold, SetID: uint32(setID), Index: byte(index), Value: value}, nil
+	return Share{Threshold: threshold, SetID: setID, Index: byte(index), Value: value}, nil
 }
 
 // Split divides secret into total shares, any threshold of which reconstruct it.
@@ -146,14 +156,13 @@ func Split(secret []byte, threshold, total int) ([]Share, error) {
 	}
 
 	// A random set identifier so shares of two different splits cannot be combined into
-	// a plausible wrong secret. Collision at 32 bits is irrelevant here: the only cost of
-	// one is that a mistake this check exists to catch goes uncaught, which is the state the
-	// old format had for every pair.
-	var setID [4]byte
-	if _, err := rand.Read(setID[:]); err != nil {
+	// a plausible wrong secret. 128 bits because the cost of a collision is that this very
+	// check silently does not happen, and 32 bits reached even odds of one after about
+	// 65,000 splits — a number a deployment issuing recovery kits actually reaches.
+	var set [setIDBytes]byte
+	if _, err := rand.Read(set[:]); err != nil {
 		return nil, fmt.Errorf("shamir: %w", err)
 	}
-	set := binary.BigEndian.Uint32(setID[:])
 
 	shares := make([]Share, total)
 	for i := range shares {
@@ -214,13 +223,19 @@ func Combine(shares []Share) ([]byte, error) {
 	threshold, set := shares[0].Threshold, shares[0].SetID
 	for _, s := range shares {
 		if s.Threshold != threshold || s.SetID != set {
-			return nil, fmt.Errorf("%w: expected threshold %d set %08x, found threshold %d set %08x",
+			return nil, fmt.Errorf("%w: expected threshold %d set %x, found threshold %d set %x",
 				ErrShareSet, threshold, set, s.Threshold, s.SetID)
 		}
 	}
-	// threshold is zero only for shares a caller built by hand rather than parsed, which
-	// carry no declaration to enforce.
-	if threshold > 0 && len(shares) < threshold {
+	// Every share must declare a threshold this package could have produced. The check
+	// used to be skipped for threshold zero, on the reasoning that a hand-built share
+	// carries no declaration to enforce — but zero is what an absent field decodes to, so
+	// the unenforced mode was the one a deserialised share landed in by default, and a
+	// caller reading the field could reasonably think it had been checked.
+	if threshold < 2 || threshold > 255 {
+		return nil, fmt.Errorf("%w: shares declare threshold %d, which no split produces", ErrMalformedShare, threshold)
+	}
+	if len(shares) < threshold {
 		return nil, fmt.Errorf("%w: %d shares, the split needs %d", ErrNotEnoughShares, len(shares), threshold)
 	}
 

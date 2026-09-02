@@ -17,6 +17,7 @@
 package auditchain
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
@@ -24,7 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"sync"
+	"math"
 )
 
 // genesis is the predecessor hash of the first record.
@@ -62,8 +63,13 @@ type Anchor struct {
 
 // Chain appends records. It is safe for concurrent use; two racing appends would
 // otherwise mint the same sequence number and the same predecessor.
+//
+// The lock is a channel rather than a sync.Mutex because persist runs while it is held,
+// and a sync.Mutex cannot be waited on with a deadline. A store that hangs therefore owned
+// the chain outright: every later append, and every Anchor(), blocked on it forever with
+// no way to shed. AppendContext lets a waiter give up.
 type Chain struct {
-	mu    sync.Mutex
+	lock  chan struct{}
 	key   []byte
 	count uint64
 	head  string
@@ -74,12 +80,39 @@ func New(key []byte) (*Chain, error) {
 	if len(key) < minKeyBytes {
 		return nil, fmt.Errorf("%w, got %d", ErrWeakKey, len(key))
 	}
-	return &Chain{key: append([]byte(nil), key...), head: genesis}, nil
+	return &Chain{lock: make(chan struct{}, 1), key: append([]byte(nil), key...), head: genesis}, nil
 }
 
-// Resume continues a chain after its last record, rejecting a record that does not carry
-// its own digest so a forged tail cannot become the thing everything after it builds on.
-func Resume(key []byte, last Record) (*Chain, error) {
+// acquire takes the chain lock, honouring ctx.
+func (c *Chain) acquire(ctx context.Context) error {
+	// Checked first because select chooses at random between ready cases, so an already
+	// cancelled caller would otherwise be admitted whenever the lock happened to be free.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case c.lock <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Chain) releaseLock() { <-c.lock }
+
+// Resume continues a chain after its last record, given the anchor that record produced.
+//
+// The anchor is required because a valid digest does not make a record the tail. Every
+// record in a healthy chain carries its own digest, so resuming from one in the middle was
+// accepted, and the next append minted a sequence number that already existed: a fork,
+// persisted successfully, that Verify then rejects forever. The anchor is the only thing
+// kept outside the log that knows where the end is, so it is what says which record the
+// tail is — and a caller who cannot produce a matching one does not know either.
+//
+// This does not verify the prefix. A chain resumed here is consistent with its anchor,
+// which is what the next append needs; call Verify or VerifyStream over the stored log to
+// establish that everything behind the anchor is intact.
+func Resume(key []byte, last Record, anchor Anchor) (*Chain, error) {
 	c, err := New(key)
 	if err != nil {
 		return nil, err
@@ -87,8 +120,21 @@ func Resume(key []byte, last Record) (*Chain, error) {
 	if !validHash(last.Hash) || !validHash(last.Prev) {
 		return nil, fmt.Errorf("%w: record %d carries a hash that is not 64 lowercase hex characters", ErrBrokenChain, last.Seq)
 	}
+	// Append mints count+1, so the top of the range wraps the next record to zero — which
+	// persists cleanly and can never verify. Zero is the other end: Append starts at one,
+	// so no record legitimately carries it.
+	if last.Seq == 0 {
+		return nil, fmt.Errorf("%w: record carries sequence 0, which no append mints", ErrBrokenChain)
+	}
+	if last.Seq == math.MaxUint64 {
+		return nil, fmt.Errorf("%w: record %d leaves no room for another append", ErrBrokenChain, last.Seq)
+	}
 	if !hmac.Equal([]byte(digest(c.key, last.Seq, last.Prev, last.Fields)), []byte(last.Hash)) {
 		return nil, fmt.Errorf("%w: record %d does not carry its own digest", ErrBrokenChain, last.Seq)
+	}
+	if anchor.Count != last.Seq || !hmac.Equal([]byte(anchor.Hash), []byte(last.Hash)) {
+		return nil, fmt.Errorf("%w: anchor is %d/%s but the record is %d/%s, so this is not the tail",
+			ErrBrokenChain, anchor.Count, anchor.Hash, last.Seq, last.Hash)
 	}
 	c.count, c.head = last.Seq, last.Hash
 	return c, nil
@@ -103,13 +149,19 @@ func Resume(key []byte, last Record) (*Chain, error) {
 // stored without its anchor left the opposite inconsistency — with no way to roll either
 // back. persist runs under the same lock that reserves the sequence number, so it should
 // write the record and the anchor together and return.
-func (c *Chain) Append(persist func(Record, Anchor) error, fields ...string) (Record, error) {
+// ctx bounds the wait for the chain lock, not persist. Once persist is running it holds
+// the sequence number it reserved and cannot be abandoned without leaving the chain unsure
+// whether the record was stored — which is the whole reason persist runs under the lock.
+// Give persist its own timeout, and do not call back into the Chain from it: the lock is
+// not reentrant, and the anchor it would ask for is already one of its arguments.
+func (c *Chain) Append(ctx context.Context, persist func(Record, Anchor) error, fields ...string) (Record, error) {
 	if persist == nil {
 		return Record{}, errors.New("auditchain: a persist function is required; the chain cannot advance without knowing the record is stored")
 	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if err := c.acquire(ctx); err != nil {
+		return Record{}, err
+	}
+	defer c.releaseLock()
 
 	rec := Record{
 		Seq:    c.count + 1,
@@ -130,8 +182,8 @@ func (c *Chain) Append(persist func(Record, Anchor) error, fields ...string) (Re
 
 // Anchor returns the state to persist outside the log, after every append.
 func (c *Chain) Anchor() Anchor {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.lock <- struct{}{}
+	defer c.releaseLock()
 	return Anchor{Count: c.count, Hash: c.head}
 }
 

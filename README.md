@@ -29,18 +29,38 @@ Reads and writes the suite's encrypted backup containers.
 
 Two containers hold real recovery data on disk, and they cannot read each other:
 
-| Container | Written by | Shape |
-|---|---|---|
-| `kycap/1` | `kysignon-server` | JSON object, base64 ciphertext string, nonce prefixed |
-| tar | `kyrecovery-server` | tar of `manifest.json`, `nonce.bin`, `payload.enc`, AAD-bound |
+One container, `kycap/2`: a JSON object holding the manifest, a base64 ciphertext with the
+nonce prefixed, and nothing else. The manifest is bound into the AEAD, so every field
+describing the capsule is authenticated rather than merely present. It is carried and
+authenticated as the exact bytes that were read, not a re-encoding of a decoded struct, so
+nothing depends on two encoders agreeing forever.
 
-`Open` reads both and always will — dropping either orphans backups already on disk.
-`Seal` writes `kycap/1` only, so the suite stops accumulating formats.
+Two containers came before it and both are retired:
+
+| Container | Was written by | Why it is gone |
+|---|---|---|
+| `kycap/1` | `kysignon-server` | Authenticated its ciphertext and nothing else |
+| tar | `kyrecovery-server` | Authenticated its ciphertext and its own `aad` string, not the rest of the manifest |
+
+In both, `capsule_id`, `service_name`, `threshold`, `total_shares` and the verification
+recipe were rewritable by anyone who could reach the file, without the key — a 2-of-3 kit
+could be restated as 1-of-1 and still open. Neither server needs its old capsules read, so
+the readers were retired rather than kept: a reader that half-trusts a manifest cannot tell
+its caller which half.
+
+`Seal` refuses a kit that cannot exist — `threshold` below 2, above `totalShares`, or a
+total past 255 — because a manifest that records recovery topology without checking it
+sends a custodian looking for shares that were never issued.
 
 ```go
-files, err := capsule.Open(raw, key, "/var/restore")   // either container
+files, err := capsule.Open(raw, key, "/var/restore")
 raw, key, err := capsule.Seal(name, version, files, nil, nil, 2, 3)
 ```
+
+The ciphertext field is standard base64 in and out. Decoding used to also accept raw-url,
+for capsules `ky_server_base` and `gridlock-server` encoded that way and never persisted;
+with one writer left, a second accepted spelling is only a second thing that has to stay
+true.
 
 `key` is raw bytes, never a hex string. The suite's implementations disagreed on that and
 bytes is the one that cannot be got wrong silently: a hex string of the right length is a
@@ -116,22 +136,33 @@ fewer shares than promised recover that byte, once every 256 draws.
 ```go
 shares, err := shamir.Split(key, 3, 5)   // any 3 of 5
 secret, err := shamir.Combine(shares)     // every share given is used
-card := shares[0].String()                // ky1-3-9f2a71c4-1-a1b2...-7d1e
+card := shares[0].String()                // ky2-3-9f2a71c4...-1-a1b2...-7d1e
 ```
 
-A share is self-describing: `ky1-<threshold>-<set id>-<index>-<value>-<check>`. The share
+A share is self-describing: `ky2-<threshold>-<set id>-<index>-<value>-<check>`. The share
 used to be `index-hex` and nothing else, which meant it could not defend against any of the
 four ways a custodian gets this wrong. Each field is there for one of them.
 
 | Field | Refuses |
 |---|---|
-| `ky1` | A share from the suite's 0x11d implementations, which was byte-indistinguishable and reconstructed a different secret with no error |
+| `ky2` | A share from the suite's 0x11d implementations, which was byte-indistinguishable and reconstructed a different secret with no error |
 | threshold | Combining fewer shares than the split needs — previously a silent wrong answer |
 | set id | Mixing shares from two different splits — also previously silent |
 | check | A character mistyped off the card, before it becomes a wrong secret |
 
 `Combine` still uses every share it is given; passing more than the threshold is correct.
 Bind a hash of the plaintext alongside anyway — `capsule`'s payload hash is that check.
+
+The set id is 128 bits. The first version of this format carried 32, which reached even
+odds of a collision after about 65,000 splits — a number a deployment issuing recovery kits
+reaches — and a collision means the check the field exists for silently does not happen.
+The narrow format is not parsed: nothing outside this package ever wrote a share, so there
+are no cards to strand, and a narrow id accepted "for compatibility" is the same collision
+still reachable.
+
+Every share must declare a threshold of 2..255. It used to be enforced only above zero,
+which is what an absent field decodes to, so a `Share` filled in by a deserialiser landed
+in the unchecked mode by default.
 
 ## auditchain
 
@@ -165,9 +196,20 @@ returns nil.
 cannot catch a log with records removed from the end, because what remains still chains
 correctly, so the anchor is a parameter rather than an option.
 
+`Resume` requires it too. A valid digest does not make a record the tail — every record in
+a healthy chain carries one — so resuming from the middle was accepted and the next append
+minted a sequence number that already existed. The anchor is the only thing that knows
+where the end is. Sequence 0 and `MaxUint64` are refused: `Append` starts at one, and
+minting `count+1` from the top wraps to zero.
+
+`Append` takes a `context.Context`, which bounds the wait for the chain lock, not
+`persist`. `persist` still runs under the lock — the record and its anchor have to be written together — so give it its own
+timeout, and do not call back into the `Chain` from it: the lock is not reentrant, and the
+anchor it would ask for is already one of its arguments.
+
 ```go
-chain, err := auditchain.New(key)          // or Resume(key, lastRecord)
-rec, err := chain.Append(func(r auditchain.Record, a auditchain.Anchor) error {
+chain, err := auditchain.New(key)          // or Resume(key, lastRecord, anchor)
+rec, err := chain.Append(ctx, func(r auditchain.Record, a auditchain.Anchor) error {
     return store.WriteRecordAndAnchor(r, a) // one transaction
 }, "login", user)
 err = auditchain.Verify(key, records, anchor)
@@ -232,12 +274,22 @@ callers should answer 503 to and must **not** spend a lockout strike on — the 
 blocks forever, so a burst parks unbounded goroutines and overload reports itself as a wrong
 password.
 
-Concurrent derivations are bounded by a **byte budget**, not a slot count: 256 MiB total,
-each reservation the size that hash actually asks for. A slot count bounded how many
-derivations ran, not how large they were, and `Verify` accepts a stored hash asking for
-anything up to 256 MiB — so four slots admitted 1 GiB while the comment above them claimed
-256 MiB. A hash needing more than the whole budget fails immediately rather than waiting
-for a slot it can never get.
+Concurrent derivations are bounded in **two dimensions**: 256 MiB of memory and 16 Argon2
+lanes, each reservation the size that hash actually asks for, both taken together under one
+queue. A request needing more than either whole budget fails immediately rather than waiting
+for what it can never get.
+
+A slot count alone bounded how many derivations ran, not how large they were, and `Verify`
+accepts a stored hash asking for anything up to 256 MiB — so four slots admitted 1 GiB while
+the comment above them claimed 256 MiB. Memory alone was no better: a stored hash at the
+8 MiB floor reserves a thirty-second of the byte budget, so 32 run at once, each free to ask
+for 16 lanes — **512 lanes**, comfortably under the memory ceiling and quite enough to take
+the login endpoint with it. `Verify` reads those parameters out of the stored hash, so
+whoever can write the store chooses them. CPU was written off as degrading rather than
+killing, which is true of one derivation and false of the fleet a byte budget admits.
+
+Taking both under the same single acquirer is what keeps the second dimension free: two
+waiters can never each hold part of what the other needs.
 
 The PHC parser compares against the canonical spelling rather than scanning. `fmt.Sscanf`
 reads the fields it is asked for and ignores the rest, so `p=4TRAILINGGARBAGE`, `p=04` and
@@ -297,11 +349,18 @@ anyone who reads the store. This package issues 12 symbols: 60 bits.
 
 Hashing and storage stay with the caller; the products disagree about the hash for reasons
 this package cannot settle, and it is not what diverged dangerously. What is here is
-generation, the normalisation both sides of a comparison must agree on, and `Match`, which
-scans every entry instead of breaking on the first hit — `ky_server_base`'s redeem loop
+generation, the normalisation both sides of a comparison must agree on, and `MatchCode`,
+which normalises and hashes before scanning every entry instead of breaking on the first
+hit — `ky_server_base`'s redeem loop
 reports the matching code's position in the list through its timing. An empty stored entry
 is a redeemed slot and never matches, so a caller blanks in place rather than removing and
 renumbering, which is how two concurrent redemptions lose each other's write.
+
+`Match` was a digest comparison named for codes. Both parameters were strings, so passing
+what the user typed compiled, ran, and never matched: enrolment hashed `Normalize(code)`
+and a redemption path that forgot the same call rejected a valid code during the emergency
+the code exists for. It is now `MatchDigest`, and `MatchCode(code, digests, hash)`
+normalises internally so the two sides cannot disagree.
 
 ## keyfile
 
@@ -352,5 +411,13 @@ salt, err := derive.SyntheticSalt(pairingKey, "login-salt/v1", username)
 
 Iterations are bounded to 100,000–12,000,000, the range both products already agreed on: the
 value arrives from a client or a stored record, and unbounded it buys minutes of CPU per
-login. `SyntheticSalt` lower-cases the username, because keying anything off the raw string
+login.
+
+A ceiling is not admission control, though — it bounds one call and says nothing about how
+many run at once, so a modest burst at the ceiling takes every core and starves the handlers
+that would have shed it. **Four concurrent slots and a 2-second wait**, past which
+`AuthSecret` returns `ErrBusy` — 503, and no lockout strike. PBKDF2 is single-threaded, so a
+slot really is a core. The budget is `derive`'s own rather than `password`'s because this
+package is standard-library-only by design and importing `password` would pull `x/crypto`
+into it. `SyntheticSalt` lower-cases the username, because keying anything off the raw string
 lets one account present as many and quietly multiplies any per-account budget above it.

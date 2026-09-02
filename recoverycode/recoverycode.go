@@ -74,7 +74,26 @@ func Normalize(code string) string {
 	return b.String()
 }
 
-// Match returns the index of the stored hash equal to candidate.
+// MatchCode redeems what a user typed against the stored digests, and is the entry point
+// a redemption path should use.
+//
+// hash is the product's own hashing, which this package deliberately does not own — the
+// products disagree about it for reasons it cannot settle. What this package does own is
+// the normalisation, and that is the whole reason this function exists: the old API was a
+// digest comparison named for codes, with two string parameters that made passing the
+// user's raw input compile and run and simply never match. Enrolment normalised, and a
+// redemption path that forgot to rejected a valid code during the emergency the code is
+// for. Normalising here means both sides cannot disagree.
+func MatchCode(code string, digests []string, hash func(string) string) (int, bool) {
+	normalized := Normalize(code)
+	if normalized == "" {
+		return 0, false
+	}
+	return MatchDigest(hash(normalized), digests)
+}
+
+// MatchDigest returns the index of the stored digest equal to candidate. Both sides are
+// already hashed; use MatchCode unless the digest was computed elsewhere.
 //
 // It compares every entry rather than returning at the first hit. ky_server_base's redeem
 // loop breaks on match, so its timing reports where in the list the code sat; the
@@ -83,12 +102,12 @@ func Normalize(code string) string {
 // An empty stored entry is a slot already redeemed and never matches, so a caller can
 // blank a slot in place instead of removing it. Removing renumbers the list, which is how
 // two concurrent redemptions lose one another's write.
-func Match(candidate string, hashes []string) (int, bool) {
+func MatchDigest(candidate string, digests []string) (int, bool) {
 	if candidate == "" {
 		return 0, false
 	}
 	found := -1
-	for i, h := range hashes {
+	for i, h := range digests {
 		if h == "" {
 			continue
 		}

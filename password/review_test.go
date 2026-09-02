@@ -147,7 +147,7 @@ func TestDerivationsRunConcurrentlyWithinTheBudget(t *testing.T) {
 	errs := make(chan error, n)
 	for range n {
 		go func() {
-			errs <- withMemory(budgetKiB/n, func() {
+			errs <- withBudget(budgetKiB/n, 1, func() {
 				arrived <- struct{}{}
 				<-release
 			})

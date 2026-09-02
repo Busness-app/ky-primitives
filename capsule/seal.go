@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Seal writes a kycap/1 container and returns it with the freshly generated AES-256 key
+// Seal writes a kycap/2 container and returns it with the freshly generated AES-256 key
 // that opens it.
 //
 // Seal does not split the key into Shamir shares. The kycap/1 container has never carried
@@ -22,6 +22,13 @@ import (
 func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]any, threshold, totalShares int) (raw, key []byte, err error) {
 	if len(files) == 0 {
 		return nil, nil, fmt.Errorf("refusing to seal a capsule with no files")
+	}
+	// The same invariant shamir.Split enforces. A capsule states its recovery topology in
+	// the manifest, and a capsule advertising 5-of-3 — or 0-of-3, which reads as "no
+	// shares needed" — sends a custodian looking for a kit that was never issuable.
+	// Recording the number without checking it makes the manifest decoration.
+	if threshold < 2 || totalShares < threshold || totalShares > 255 {
+		return nil, nil, fmt.Errorf("capsule: %d-of-%d is not a recoverable kit; need 2 <= threshold <= total <= 255", threshold, totalShares)
 	}
 
 	payload, err := buildPayload(files)
@@ -44,23 +51,36 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 	}
 
 	sum := sha256.Sum256(payload)
-	sealed := gcm.Seal(nonce, nonce, payload, nil)
 
-	raw, err = json.MarshalIndent(kycapFile{
-		Format: KycapFileFormat,
-		Manifest: manifest{
-			CapsuleID:          fmt.Sprintf("cap-%s-%d", serviceName, time.Now().UnixNano()),
-			ServiceName:        serviceName,
-			AppVersion:         appVersion,
-			CreatedAt:          time.Now().UTC(),
-			PayloadHash:        hex.EncodeToString(sum[:]),
-			Threshold:          threshold,
-			TotalShares:        totalShares,
-			Dependencies:       deps,
-			VerificationRecipe: recipe,
-		},
+	now := time.Now().UTC()
+	// Marshalled once, then used twice: these bytes are the AAD and they are what lands
+	// in the container. Deriving the AAD from a second encoding of the same struct would
+	// make every capsule depend on two encoders agreeing forever.
+	manifestBytes, err := json.Marshal(manifest{
+		CapsuleID:          fmt.Sprintf("cap-%s-%d", serviceName, now.UnixNano()),
+		ServiceName:        serviceName,
+		AppVersion:         appVersion,
+		CreatedAt:          now,
+		PayloadHash:        hex.EncodeToString(sum[:]),
+		Threshold:          threshold,
+		TotalShares:        totalShares,
+		Dependencies:       deps,
+		VerificationRecipe: recipe,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	sealed := gcm.Seal(nonce, nonce, payload, manifestBytes)
+
+	// json.Marshal rather than MarshalIndent: indenting re-spaces the embedded manifest,
+	// and the AAD is the manifest's exact bytes. A pretty container that cannot be opened
+	// is not a trade worth making.
+	raw, err = json.Marshal(kycapFile{
+		Format:     KycapFileFormat,
+		Manifest:   manifestBytes,
 		Ciphertext: EncodeCiphertext(sealed),
-	}, "", "  ")
+	})
 	if err != nil {
 		return nil, nil, err
 	}

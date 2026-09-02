@@ -46,9 +46,8 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	}
 }
 
-// Seal must write the container kysignon-server already reads, or a migrated product
-// writes capsules the unmigrated ones cannot open.
-func TestSealWritesKycap1(t *testing.T) {
+// kycap/2 binds the manifest into the AEAD, and is the only container this package knows.
+func TestSealWritesKycap2(t *testing.T) {
 	raw, _, err := capsule.Seal("fixture", "0.0.0",
 		[]capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}, nil, nil, 2, 3)
 	if err != nil {

@@ -1,6 +1,7 @@
 package auditchain
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -40,7 +41,8 @@ func TestVerifyRejectsMalformedHashes(t *testing.T) {
 }
 
 func TestResumeRejectsAMalformedHash(t *testing.T) {
-	if _, err := Resume(key, Record{Seq: 1, Prev: genesis, Hash: "nothex", Fields: []string{"a"}}); !errors.Is(err, ErrBrokenChain) {
+	bad := Record{Seq: 1, Prev: genesis, Hash: "nothex", Fields: []string{"a"}}
+	if _, err := Resume(key, bad, Anchor{Count: 1, Hash: bad.Hash}); !errors.Is(err, ErrBrokenChain) {
 		t.Fatalf("got %v, want ErrBrokenChain", err)
 	}
 }
@@ -54,13 +56,13 @@ func TestAppendDoesNotAdvanceWhenPersistFails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := c.Append(func(Record, Anchor) error { return nil }, "a")
+	first, err := c.Append(context.Background(), func(Record, Anchor) error { return nil }, "a")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	boom := errors.New("insert failed")
-	if _, err := c.Append(func(Record, Anchor) error { return boom }, "b"); !errors.Is(err, boom) {
+	if _, err := c.Append(context.Background(), func(Record, Anchor) error { return boom }, "b"); !errors.Is(err, boom) {
 		t.Fatalf("got %v, want the persist error", err)
 	}
 	if got := c.Anchor(); got.Count != 1 || got.Hash != first.Hash {
@@ -69,7 +71,7 @@ func TestAppendDoesNotAdvanceWhenPersistFails(t *testing.T) {
 
 	// The next successful append must continue from the first record, not from the one
 	// that was never stored.
-	second, err := c.Append(func(Record, Anchor) error { return nil }, "c")
+	second, err := c.Append(context.Background(), func(Record, Anchor) error { return nil }, "c")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +95,7 @@ func TestAppendHandsThePersisterTheResultingAnchor(t *testing.T) {
 	}
 	var seen []Anchor
 	for i := 0; i < 3; i++ {
-		rec, err := c.Append(func(r Record, a Anchor) error {
+		rec, err := c.Append(context.Background(), func(r Record, a Anchor) error {
 			seen = append(seen, a)
 			if a.Hash != r.Hash {
 				t.Fatalf("anchor hash %q does not match record hash %q", a.Hash, r.Hash)
@@ -114,7 +116,7 @@ func TestAppendRequiresAPersister(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Append(nil, "a"); err == nil {
+	if _, err := c.Append(context.Background(), nil, "a"); err == nil {
 		t.Fatal("a nil persister was accepted")
 	}
 	if got := c.Anchor(); got.Count != 0 {

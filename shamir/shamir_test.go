@@ -184,7 +184,7 @@ func TestParseShareRejectsMalformed(t *testing.T) {
 // the checksum covers the exact bytes, so folding case would mean either ignoring the
 // checksum or recomputing it over something the card does not say.
 func TestParseShareAcceptsSurroundingSpace(t *testing.T) {
-	want := Share{Threshold: 2, SetID: 0xa1b2c3d4, Index: 2, Value: []byte{0xa1, 0xb2}}
+	want := Share{Threshold: 2, SetID: [16]byte{12: 0xa1, 13: 0xb2, 14: 0xc3, 15: 0xd4}, Index: 2, Value: []byte{0xa1, 0xb2}}
 	got, err := ParseShare("  " + want.String() + "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -217,10 +217,12 @@ func TestGoldenVectors(t *testing.T) {
 	//   f(3) = 0x01 ^ (0x7f ^ 0xb2 = 0xcd)  = 0xcc
 	// Pins the reduction polynomial. Change the field and this fails, which is the
 	// point: every custodian card already printed would become unreadable.
+	// Threshold is declared because Combine requires every share to carry one; the
+	// polynomial above is degree 1, so two shares reconstruct it.
 	full := []Share{
-		{Index: 1, Value: []byte{0xb3}},
-		{Index: 2, Value: []byte{0x7e}},
-		{Index: 3, Value: []byte{0xcc}},
+		{Threshold: 2, Index: 1, Value: []byte{0xb3}},
+		{Threshold: 2, Index: 2, Value: []byte{0x7e}},
+		{Threshold: 2, Index: 3, Value: []byte{0xcc}},
 	}
 	for _, sub := range [][]int{{0, 1}, {0, 2}, {1, 2}, {0, 1, 2}} {
 		var shares []Share

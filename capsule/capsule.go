@@ -1,17 +1,16 @@
-// Package capsule reads and writes the suite's encrypted backup containers.
+// Package capsule reads and writes the suite's encrypted backup container.
 //
-// Two containers exist on disk and hold real recovery data:
+// The container is kycap/2: a JSON object holding the manifest, a base64 ciphertext with
+// the nonce prefixed, and nothing else. The manifest is bound into the AEAD, so every
+// field describing the capsule is authenticated rather than merely present.
 //
-//	kycap/1  a JSON object with a base64 ciphertext string, written by kysignon-server
-//	tar      a tar of manifest.json, nonce.bin and payload.enc, written by kyrecovery-server
+// Two containers came before it — kysignon-server's kycap/1 and kyrecovery-server's tar —
+// and both are retired. Each authenticated its ciphertext and left the manifest outside
+// the AEAD, which made the recovery topology a capsule advertises editable by anyone who
+// could reach the file.
 //
-// Open reads both. Seal writes kycap/1 only. Reading must stay permissive forever —
-// dropping either container orphans backups already on disk — while writing converges so
-// the suite stops accumulating formats.
-//
-// Both containers decrypt to the same thing: a gzipped tar of the backed-up files. That
-// is why the hardened extraction in extract.go is shared, and why a kyrecovery capsule
-// opened through this package gets path and size checks its own Unpack never applied.
+// The payload is a gzipped tar of the backed-up files, extracted through the hardening in
+// extract.go.
 package capsule
 
 import (

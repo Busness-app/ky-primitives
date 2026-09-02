@@ -1,0 +1,42 @@
+name: Fuzz
+
+# go test only replays a fuzz target's seed corpus. Actually fuzzing needs -fuzz, which
+# runs until told to stop, so it belongs on a schedule rather than in the PR path.
+on:
+  schedule:
+    - cron: '17 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: ./shamir
+            target: FuzzCombineNeverPanics
+          - package: ./shamir
+            target: FuzzParseShareNeverPanics
+          - package: ./capsule
+            target: FuzzOpenNeverPanics
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+      - name: Fuzz
+        env:
+          PKG: ${{ matrix.package }}
+          TARGET: ${{ matrix.target }}
+        run: go test "$PKG" -run '^$' -fuzz "^${TARGET}$" -fuzztime=10m
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers-${{ matrix.target }}
+          path: ${{ github.workspace }}/**/testdata/fuzz/**
+          if-no-files-found: ignore

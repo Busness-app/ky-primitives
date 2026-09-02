@@ -83,7 +83,7 @@ func TestGeneratedCodesNormalizeToThemselves(t *testing.T) {
 func TestMatchFindsTheRightIndex(t *testing.T) {
 	hashes := []string{"aa", "bb", "cc", "dd"}
 	for want, h := range hashes {
-		got, ok := Match(h, hashes)
+		got, ok := MatchDigest(h, hashes)
 		if !ok {
 			t.Fatalf("%q not found", h)
 		}
@@ -94,13 +94,13 @@ func TestMatchFindsTheRightIndex(t *testing.T) {
 }
 
 func TestMatchReportsAbsence(t *testing.T) {
-	if _, ok := Match("zz", []string{"aa", "bb"}); ok {
+	if _, ok := MatchDigest("zz", []string{"aa", "bb"}); ok {
 		t.Fatal("a hash that is not present was found")
 	}
-	if _, ok := Match("aa", nil); ok {
+	if _, ok := MatchDigest("aa", nil); ok {
 		t.Fatal("a hash was found in an empty list")
 	}
-	if _, ok := Match("", []string{"aa"}); ok {
+	if _, ok := MatchDigest("", []string{"aa"}); ok {
 		t.Fatal("an empty candidate matched")
 	}
 }
@@ -108,10 +108,10 @@ func TestMatchReportsAbsence(t *testing.T) {
 // An already-redeemed slot is blanked rather than removed, so indices stay stable and two
 // concurrent redemptions cannot renumber each other's target.
 func TestMatchSkipsRedeemedSlots(t *testing.T) {
-	if _, ok := Match("", []string{"", "aa"}); ok {
+	if _, ok := MatchDigest("", []string{"", "aa"}); ok {
 		t.Fatal("an empty stored slot matched an empty candidate")
 	}
-	got, ok := Match("aa", []string{"", "aa"})
+	got, ok := MatchDigest("aa", []string{"", "aa"})
 	if !ok || got != 1 {
 		t.Fatalf("got %d ok=%v, want 1 true", got, ok)
 	}
