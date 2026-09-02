@@ -65,17 +65,30 @@ func AuthSecret(password, saltBase64 string, iterations int, label string) (stri
 	return hex.EncodeToString(out), nil
 }
 
+// MinSyntheticKeyBytes is the floor for the key behind a synthetic salt.
+//
+// The salt itself is not secret — its job is uniqueness. The key is: an attacker who can
+// compute synthetic salts can tell them apart from the random salts real accounts carry,
+// which is exactly the account-existence oracle this function exists to close. An empty
+// or short key makes every synthetic salt predictable, so it is refused rather than used.
+const MinSyntheticKeyBytes = 32
+
 // SyntheticSalt derives a stable per-user login salt for an account that has none, so a
 // probe cannot tell a registered username from an unregistered one by whether a salt comes
 // back.
 //
-// A salt's job is uniqueness, not secrecy. The username is lower-cased first: keying
-// anything off the raw string lets one account present as many, which quietly multiplies
-// any per-account budget layered on top.
-func SyntheticSalt(key []byte, label, username string) string {
+// The username is lower-cased first: keying anything off the raw string lets one account
+// present as many, which quietly multiplies any per-account budget layered on top.
+func SyntheticSalt(key []byte, label, username string) (string, error) {
+	if len(key) < MinSyntheticKeyBytes {
+		return "", fmt.Errorf("derive: synthetic salt key is %d bytes, want at least %d", len(key), MinSyntheticKeyBytes)
+	}
+	if label == "" {
+		return "", errors.New("derive: label is required, it is the domain separation")
+	}
 	mac := hmac.New(sha256.New, key)
 	// NUL separates the label from the username. It is the one byte a username cannot
 	// contain, so no username can straddle the boundary and impersonate another.
 	mac.Write([]byte(label + "\x00" + strings.ToLower(username)))
-	return base64.StdEncoding.EncodeToString(mac.Sum(nil)[:minSaltBytes])
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil)[:minSaltBytes]), nil
 }

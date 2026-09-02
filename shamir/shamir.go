@@ -17,6 +17,8 @@ package shamir
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -24,12 +26,22 @@ import (
 	"strings"
 )
 
+// Version tags the wire format and, with it, the field.
+//
+// A share used to be "index-hex" with nothing else in it. That made a share from the
+// suite's 0x11d implementations byte-indistinguishable from one of these, and combining
+// across the two returns a different secret with no error at all. The tag is what turns
+// that into a refusal.
+const Version = "ky1"
+
 var (
-	// ErrNotEnoughShares reports fewer than two shares handed to Combine. It cannot
-	// report fewer than the threshold: a share carries no record of what the threshold
-	// was, so too few shares reconstruct a wrong secret with no error. Bind a hash of
-	// the plaintext alongside — the capsule package's payload hash is that check.
-	ErrNotEnoughShares = errors.New("shamir: at least two shares are required")
+	// ErrNotEnoughShares reports fewer shares than the threshold the shares themselves
+	// declare.
+	ErrNotEnoughShares = errors.New("shamir: fewer shares than the threshold requires")
+	// ErrShareVersion reports a share that is not this wire format.
+	ErrShareVersion = errors.New("shamir: share is not " + Version + " format")
+	// ErrShareSet reports shares that do not belong to one split.
+	ErrShareSet = errors.New("shamir: shares belong to different splits")
 	// ErrDuplicateIndex reports shares repeating an index, which makes a Lagrange
 	// denominator zero.
 	ErrDuplicateIndex = errors.New("shamir: shares repeat an index")
@@ -42,38 +54,82 @@ var (
 )
 
 // Share is one custodian's portion of a secret.
+//
+// Threshold and SetID travel with the share rather than in a manifest the custodian may
+// not have. They are not secret — a share already reveals nothing about the secret — and
+// they let Combine refuse the two mistakes that previously produced a plausible wrong
+// answer: too few shares, and shares from two different splits.
 type Share struct {
-	Index byte
-	Value []byte
+	Threshold int
+	SetID     uint32
+	Index     byte
+	Value     []byte
 }
 
-// String renders a share for a custodian card as "index-hex".
+// String renders a share for a custodian card:
+//
+//	ky1-<threshold>-<set id>-<index>-<value>-<check>
+//
+// check is the first two bytes of SHA-256 over everything preceding it, so a card
+// mistyped under stress fails at parse rather than reconstructing a wrong secret.
 func (s Share) String() string {
-	return strconv.Itoa(int(s.Index)) + "-" + hex.EncodeToString(s.Value)
+	body := s.body()
+	return body + "-" + checksum(body)
 }
 
-// ParseShare reads a share off a custodian card. Surrounding space and uppercase hex are
-// accepted because the string is typed in by a human under stress.
+func (s Share) body() string {
+	return Version +
+		"-" + strconv.Itoa(s.Threshold) +
+		"-" + fmt.Sprintf("%08x", s.SetID) +
+		"-" + strconv.Itoa(int(s.Index)) +
+		"-" + hex.EncodeToString(s.Value)
+}
+
+func checksum(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return hex.EncodeToString(sum[:2])
+}
+
+// ParseShare reads a share off a custodian card. Surrounding space is accepted because a
+// human types this; case is not, because the checksum covers the exact bytes.
 func ParseShare(encoded string) (Share, error) {
-	parts := strings.Split(strings.TrimSpace(encoded), "-")
-	if len(parts) != 2 {
-		return Share{}, ErrMalformedShare
+	encoded = strings.TrimSpace(encoded)
+	parts := strings.Split(encoded, "-")
+	if len(parts) != 6 {
+		return Share{}, fmt.Errorf("%w: %d fields, want 6", ErrShareVersion, len(parts))
 	}
-	index, err := strconv.Atoi(parts[0])
+	if parts[0] != Version {
+		return Share{}, fmt.Errorf("%w: tag %q", ErrShareVersion, parts[0])
+	}
+
+	body := encoded[:strings.LastIndex(encoded, "-")]
+	if want := checksum(body); parts[5] != want {
+		return Share{}, fmt.Errorf("%w: checksum %q, expected %q — check the card for a mistyped character", ErrMalformedShare, parts[5], want)
+	}
+
+	threshold, err := strconv.Atoi(parts[1])
+	if err != nil || threshold < 2 || threshold > 255 {
+		return Share{}, fmt.Errorf("%w: threshold %q", ErrMalformedShare, parts[1])
+	}
+	setID, err := strconv.ParseUint(parts[2], 16, 32)
+	if err != nil || len(parts[2]) != 8 {
+		return Share{}, fmt.Errorf("%w: set id %q", ErrMalformedShare, parts[2])
+	}
+	index, err := strconv.Atoi(parts[3])
 	if err != nil {
 		return Share{}, fmt.Errorf("%w: %v", ErrMalformedShare, err)
 	}
 	if index < 1 || index > 255 {
 		return Share{}, ErrShareIndex
 	}
-	value, err := hex.DecodeString(parts[1])
+	value, err := hex.DecodeString(parts[4])
 	if err != nil {
 		return Share{}, fmt.Errorf("%w: %v", ErrMalformedShare, err)
 	}
 	if len(value) == 0 {
 		return Share{}, ErrShareLength
 	}
-	return Share{Index: byte(index), Value: value}, nil
+	return Share{Threshold: threshold, SetID: uint32(setID), Index: byte(index), Value: value}, nil
 }
 
 // Split divides secret into total shares, any threshold of which reconstruct it.
@@ -89,9 +145,24 @@ func Split(secret []byte, threshold, total int) ([]Share, error) {
 		return nil, errors.New("shamir: at most 255 shares fit in GF(2^8)")
 	}
 
+	// A random set identifier so shares of two different splits cannot be combined into
+	// a plausible wrong secret. Collision at 32 bits is irrelevant here: the only cost of
+	// one is that a mistake this check exists to catch goes uncaught, which is the state the
+	// old format had for every pair.
+	var setID [4]byte
+	if _, err := rand.Read(setID[:]); err != nil {
+		return nil, fmt.Errorf("shamir: %w", err)
+	}
+	set := binary.BigEndian.Uint32(setID[:])
+
 	shares := make([]Share, total)
 	for i := range shares {
-		shares[i] = Share{Index: byte(i + 1), Value: make([]byte, len(secret))}
+		shares[i] = Share{
+			Threshold: threshold,
+			SetID:     set,
+			Index:     byte(i + 1),
+			Value:     make([]byte, len(secret)),
+		}
 	}
 
 	coefficients := make([]byte, threshold)
@@ -119,7 +190,7 @@ func Split(secret []byte, threshold, total int) ([]Share, error) {
 // secret rather than an error, for the reason on ErrNotEnoughShares.
 func Combine(shares []Share) ([]byte, error) {
 	if len(shares) < 2 {
-		return nil, ErrNotEnoughShares
+		return nil, fmt.Errorf("%w: got %d", ErrNotEnoughShares, len(shares))
 	}
 	size := len(shares[0].Value)
 	if size == 0 {
@@ -136,6 +207,21 @@ func Combine(shares []Share) ([]byte, error) {
 			return nil, ErrShareLength
 		}
 		seen[s.Index] = true
+	}
+
+	// Set consistency after the per-share checks, so a malformed share is reported as
+	// malformed rather than as a set mismatch.
+	threshold, set := shares[0].Threshold, shares[0].SetID
+	for _, s := range shares {
+		if s.Threshold != threshold || s.SetID != set {
+			return nil, fmt.Errorf("%w: expected threshold %d set %08x, found threshold %d set %08x",
+				ErrShareSet, threshold, set, s.Threshold, s.SetID)
+		}
+	}
+	// threshold is zero only for shares a caller built by hand rather than parsed, which
+	// carry no declaration to enforce.
+	if threshold > 0 && len(shares) < threshold {
+		return nil, fmt.Errorf("%w: %d shares, the split needs %d", ErrNotEnoughShares, len(shares), threshold)
 	}
 
 	// Distinct non-zero indices make every denominator non-zero, so no inverse here can

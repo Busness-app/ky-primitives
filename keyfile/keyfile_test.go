@@ -191,3 +191,44 @@ func TestRngFailureIsAnErrorAndWritesNothing(t *testing.T) {
 		t.Fatal("a key file was left on disk after the RNG failed")
 	}
 }
+
+// Finding 3.2: the key was written directly to its final name, so a short write or a
+// full disk left partial hex at the real path — which every later start then refuses
+// forever, since the package correctly will not replace an unreadable key.
+func TestAFailedWriteLeavesNoKeyFileBehind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.key")
+
+	original := writeAll
+	boom := errors.New("no space left on device")
+	writeAll = func(f *os.File, s string) error {
+		_, _ = f.WriteString(s[:len(s)/2]) // a real short write, then the failure
+		return boom
+	}
+	t.Cleanup(func() { writeAll = original })
+
+	if _, err := LoadOrCreate(path, 32); !errors.Is(err, boom) {
+		t.Fatalf("got %v, want the write error", err)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a partial key file was left at the final path")
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("temporary state left behind: %v", names)
+	}
+
+	// And the next attempt must succeed rather than inherit the wreckage.
+	writeAll = original
+	if _, err := LoadOrCreate(path, 32); err != nil {
+		t.Fatalf("recovery attempt failed: %v", err)
+	}
+}

@@ -52,6 +52,14 @@ Both containers decrypt to a gzipped tar, so one hardened extraction serves both
 ported from `kysignon-server`, which carried the strongest version in the suite, and it
 means a `kyrecovery-server` capsule opened here gets checks its own `Unpack` never applied.
 
+Extraction runs through an `os.Root` handle, so every component resolves against a
+directory descriptor and no member can name a location outside the target. Containment
+used to be a string comparison plus `Lstat` on each parent, which a process able to swap a
+checked parent for a symlink could step through — `O_NOFOLLOW` only guards the last
+component. Go picks `openat2` where the kernel has it, so this carries no minimum kernel of
+its own. A failed extraction rolls back whatever it wrote, because the target must be empty
+to start and a half-restored keyset otherwise poisons every retry.
+
 Refused: path traversal, absolute paths, backslash separators, NUL bytes, symlinks,
 hardlinks, directories, device nodes, FIFOs, archives over 8 GiB expanded, members over
 4 GiB, more than 4096 files, and any restore into a non-empty directory. File modes are
@@ -108,14 +116,22 @@ fewer shares than promised recover that byte, once every 256 draws.
 ```go
 shares, err := shamir.Split(key, 3, 5)   // any 3 of 5
 secret, err := shamir.Combine(shares)     // every share given is used
-card := shares[0].String()                // "1-a1b2..." for a custodian card
+card := shares[0].String()                // ky1-3-9f2a71c4-1-a1b2...-7d1e
 ```
 
-`Combine` takes no threshold. A share carries no record of what the threshold was, so too
-few shares reconstruct a wrong secret whatever you pass — an argument that cannot make the
-answer safer is one more thing to get wrong. Bind a hash of the plaintext alongside
-instead; `capsule`'s payload hash is exactly that check, and it is what currently turns a
-cross-field reconstruction into `ErrCorruptCapsule` rather than a garbage key.
+A share is self-describing: `ky1-<threshold>-<set id>-<index>-<value>-<check>`. The share
+used to be `index-hex` and nothing else, which meant it could not defend against any of the
+four ways a custodian gets this wrong. Each field is there for one of them.
+
+| Field | Refuses |
+|---|---|
+| `ky1` | A share from the suite's 0x11d implementations, which was byte-indistinguishable and reconstructed a different secret with no error |
+| threshold | Combining fewer shares than the split needs — previously a silent wrong answer |
+| set id | Mixing shares from two different splits — also previously silent |
+| check | A character mistyped off the card, before it becomes a wrong secret |
+
+`Combine` still uses every share it is given; passing more than the threshold is correct.
+Bind a hash of the plaintext alongside anyway — `capsule`'s payload hash is that check.
 
 ## auditchain
 
@@ -138,13 +154,22 @@ Every field is length-prefixed. Joining on a delimiter lets a field containing i
 into its neighbour and produce another record's digest, forging a record without the key;
 `TestFieldsAreUnambiguousAcrossDelimiters` pins that.
 
+Persistence is a parameter of `Append`, not the caller's next statement. The chain's
+in-memory head is a claim about what is on disk: advancing it first meant a failed insert
+left the next record chained onto one that never existed, and a record stored without its
+anchor left the opposite inconsistency, with no way to roll back either. `persist` runs
+under the lock that reserves the sequence number, and the chain advances only if it
+returns nil.
+
 `Verify` requires the `Anchor` — a count and head hash kept outside the log. Hashes alone
 cannot catch a log with records removed from the end, because what remains still chains
 correctly, so the anchor is a parameter rather than an option.
 
 ```go
 chain, err := auditchain.New(key)          // or Resume(key, lastRecord)
-rec, err := chain.Append("login", user)    // persist rec, and chain.Anchor() beside it
+rec, err := chain.Append(func(r auditchain.Record, a auditchain.Anchor) error {
+    return store.WriteRecordAndAnchor(r, a) // one transaction
+}, "login", user)
 err = auditchain.Verify(key, records, anchor)
 err = auditchain.VerifyStream(key, rows, anchor) // same, for a log too large to hold
 ```
@@ -206,6 +231,17 @@ callers should answer 503 to and must **not** spend a lockout strike on — the 
 "not now", not the user getting the password wrong. `kynotes-server` bounds the same way but
 blocks forever, so a burst parks unbounded goroutines and overload reports itself as a wrong
 password.
+
+Concurrent derivations are bounded by a **byte budget**, not a slot count: 256 MiB total,
+each reservation the size that hash actually asks for. A slot count bounded how many
+derivations ran, not how large they were, and `Verify` accepts a stored hash asking for
+anything up to 256 MiB — so four slots admitted 1 GiB while the comment above them claimed
+256 MiB. A hash needing more than the whole budget fails immediately rather than waiting
+for a slot it can never get.
+
+The PHC parser compares against the canonical spelling rather than scanning. `fmt.Sscanf`
+reads the fields it is asked for and ignores the rest, so `p=4TRAILINGGARBAGE`, `p=04` and
+`v=19GARBAGE` all verified clean.
 
 ```go
 encoded, err := password.Hash(plaintext)        // "$argon2id$v=19$m=65536,t=3,p=4$..."
@@ -311,7 +347,7 @@ rather than adding one** — which is the only reason it can live here at all.
 
 ```go
 secret, err := derive.AuthSecret(password, saltB64, iterations, "kynotes/auth/v1")
-salt := derive.SyntheticSalt(pairingKey, "login-salt/v1", username)
+salt, err := derive.SyntheticSalt(pairingKey, "login-salt/v1", username)
 ```
 
 Iterations are bounded to 100,000–12,000,000, the range both products already agreed on: the

@@ -29,18 +29,56 @@ func TestMatchesTheExistingImplementation(t *testing.T) {
 	}
 }
 
+// Produced by running kynotes-server's SyntheticLoginSalt, not this package.
+const synthKey = "0123456789abcdef0123456789abcdef"
+
 func TestSyntheticSaltMatchesTheExistingImplementation(t *testing.T) {
-	got := SyntheticSalt([]byte("pairing-secret"), "login-salt/v1", "Alice")
-	if want := "3LgDvh1bCB50oRXCbLv0tQ=="; got != want {
+	got, err := SyntheticSalt([]byte(synthKey), "login-salt/v1", "Alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "UDuT7+xmxlasLhMfxQYnzg=="; got != want {
 		t.Fatalf("got %s, want %s", got, want)
 	}
 }
 
 func TestSyntheticSaltFoldsCase(t *testing.T) {
-	a := SyntheticSalt([]byte("k"), "login-salt/v1", "Alice")
-	b := SyntheticSalt([]byte("k"), "login-salt/v1", "alice")
+	a, err := SyntheticSalt([]byte(synthKey), "login-salt/v1", "Alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := SyntheticSalt([]byte(synthKey), "login-salt/v1", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if a != b {
 		t.Fatal("the same username in two cases produced two salts, so a lockout budget splits")
+	}
+}
+
+// Finding 4.3: a missing configuration value made every synthetic salt predictable, and
+// the function reported success.
+func TestSyntheticSaltRejectsAWeakKeyOrEmptyLabel(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		key   []byte
+		label string
+	}{
+		{"nil key", nil, "login-salt/v1"},
+		{"empty key", []byte{}, "login-salt/v1"},
+		{"short key", []byte("pairing-secret"), "login-salt/v1"},
+		{"one byte under", make([]byte, MinSyntheticKeyBytes-1), "login-salt/v1"},
+		{"empty label", []byte(synthKey), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := SyntheticSalt(tc.key, tc.label, "alice")
+			if err == nil {
+				t.Fatalf("accepted, returning %q", got)
+			}
+			if got != "" {
+				t.Fatalf("returned %q alongside an error", got)
+			}
+		})
 	}
 }
 

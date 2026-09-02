@@ -21,7 +21,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/argon2"
@@ -34,9 +36,22 @@ type Params struct {
 	Threads uint8
 }
 
-// Default is RFC 9106's second recommended option. The first asks for 2 GiB, which no
-// login endpoint can afford per request.
-var Default = Params{Memory: 64 * 1024, Time: 3, Threads: 4}
+// DefaultParams returns RFC 9106's second recommended option. The first asks for 2 GiB,
+// which no login endpoint can afford per request.
+//
+// A function rather than a variable: an exported var is global policy any importer can
+// assign to, and a configuration reload writing it while a login reads it is a data race
+// that also lets two concurrent hashes use different parameters. Callers wanting other
+// costs pass a Params to a call, they do not edit everyone else's.
+func DefaultParams() Params {
+	return Params{Memory: defaultMemory, Time: defaultTime, Threads: defaultThreads}
+}
+
+const (
+	defaultMemory  = 64 * 1024
+	defaultTime    = 3
+	defaultThreads = 4
+)
 
 const (
 	saltBytes = 16
@@ -67,34 +82,112 @@ var (
 	ErrMalformed = errors.New("password: stored hash is not a valid argon2id PHC string")
 )
 
-// ponytail: fixed slot count and wait. 4 slots at 64 MiB caps derivation memory at
-// 256 MiB; make them configurable if a deployment needs a different ceiling.
+// ponytail: fixed budget and wait. Make them configurable if a deployment needs a
+// different ceiling.
 const (
-	maxConcurrent = 4
-	maxWait       = 2 * time.Second
+	// budgetKiB is the total memory all concurrent derivations may reserve, equal to
+	// four derivations at the default 64 MiB.
+	//
+	// It is a byte budget rather than a slot count because slots bound how many
+	// derivations run, not how large they are, and Verify accepts a stored hash asking
+	// for anything up to maxMemory. Four slots therefore admitted 4 x 256 MiB while this
+	// comment claimed 256 MiB. Reserving p.Memory makes the number here the number
+	// enforced.
+	budgetKiB = 4 * 64 * 1024
+	maxWait   = 2 * time.Second
 )
 
-var slots = make(chan struct{}, maxConcurrent)
+// Memory is what OOM-kills a process, so it is what the budget counts. Time and Threads
+// cost CPU, which degrades rather than kills, and the wait below sheds that.
+var budget = struct {
+	admit chan struct{} // capacity 1: one acquirer negotiates at a time
+	wake  chan struct{} // poked on release
+	mu    sync.Mutex
+	free  int64
+	peak  int64
+}{
+	admit: make(chan struct{}, 1),
+	wake:  make(chan struct{}, 1),
+	free:  budgetKiB,
+}
 
-// withSlot bounds concurrent derivations and sheds past the wait rather than queueing.
-// kynotes-server bounds the same way but blocks forever, so a burst of logins parks an
-// unbounded number of goroutines and overload reports itself as a wrong password.
-func withSlot(fn func()) error {
+// withMemory runs fn holding a reservation of kib, or reports ErrBusy.
+//
+// Acquirers are serialised through admit so that no two can each hold part of what the
+// other needs, which is the deadlock a naive multi-token semaphore has. It also makes the
+// queue first-come rather than letting small requests starve a large one.
+func withMemory(kib int64, fn func()) error {
+	if kib > budgetKiB {
+		// Unsatisfiable however long we wait, so say so now rather than after maxWait.
+		return fmt.Errorf("%w: needs %d KiB, the whole budget is %d KiB", ErrBusy, kib, budgetKiB)
+	}
 	timer := time.NewTimer(maxWait)
 	defer timer.Stop()
+
 	select {
-	case slots <- struct{}{}:
-		defer func() { <-slots }()
-		fn()
-		return nil
+	case budget.admit <- struct{}{}:
 	case <-timer.C:
 		return ErrBusy
 	}
+	acquired := false
+	defer func() {
+		<-budget.admit
+		if acquired {
+			budget.mu.Lock()
+			budget.free += kib
+			budget.mu.Unlock()
+			select {
+			case budget.wake <- struct{}{}:
+			default:
+			}
+		}
+	}()
+
+	for {
+		budget.mu.Lock()
+		if budget.free >= kib {
+			budget.free -= kib
+			if used := budgetKiB - budget.free; used > budget.peak {
+				budget.peak = used
+			}
+			budget.mu.Unlock()
+			acquired = true
+			fn()
+			return nil
+		}
+		budget.mu.Unlock()
+
+		select {
+		case <-budget.wake:
+		case <-timer.C:
+			return ErrBusy
+		}
+	}
+}
+
+// peakReserved, inFlight and resetPeak exist for the budget test, which cannot observe a
+// ceiling it has no way to measure.
+func peakReserved() int64 {
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	return budget.peak
+}
+
+func inFlight() int64 {
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	return budgetKiB - budget.free
+}
+
+func resetPeak() {
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	budget.peak = 0
 }
 
 // Hash derives a PHC-encoded Argon2id hash at the current parameters.
 func Hash(plaintext string) (string, error) {
-	return hashWith(plaintext, Default)
+	return hashWith(plaintext, DefaultParams())
 }
 
 func hashWith(plaintext string, p Params) (string, error) {
@@ -109,15 +202,14 @@ func hashWith(plaintext string, p Params) (string, error) {
 		return "", fmt.Errorf("password: %w", err)
 	}
 	var key []byte
-	if err := withSlot(func() {
+	if err := withMemory(int64(p.Memory), func() {
 		key = argon2.IDKey([]byte(plaintext), salt, p.Time, p.Memory, p.Threads, keyBytes)
 	}); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
-		version, p.Memory, p.Time, p.Threads,
-		base64.RawStdEncoding.EncodeToString(salt),
-		base64.RawStdEncoding.EncodeToString(key)), nil
+	return "$argon2id$" + versionSegment + "$" + p.segment() + "$" +
+		base64.RawStdEncoding.EncodeToString(salt) + "$" +
+		base64.RawStdEncoding.EncodeToString(key), nil
 }
 
 // Verify reports whether plaintext produced encoded. A malformed or out-of-bounds stored
@@ -128,7 +220,7 @@ func Verify(plaintext, encoded string) (bool, error) {
 		return false, err
 	}
 	var got []byte
-	if err := withSlot(func() {
+	if err := withMemory(int64(p.Memory), func() {
 		got = argon2.IDKey([]byte(plaintext), salt, p.Time, p.Memory, p.Threads, uint32(len(want)))
 	}); err != nil {
 		return false, err
@@ -143,7 +235,49 @@ func NeedsRehash(encoded string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return p.Memory < Default.Memory || p.Time < Default.Time || p.Threads != Default.Threads, nil
+	d := DefaultParams()
+	return p.Memory < d.Memory || p.Time < d.Time || p.Threads != d.Threads, nil
+}
+
+// versionSegment is the only version segment this package accepts or emits.
+var versionSegment = "v=" + strconv.Itoa(version)
+
+// parseParams reads "m=<n>,t=<n>,p=<n>" and nothing else.
+//
+// Every field is parsed with strconv, then the whole segment is re-encoded and compared
+// to the input. That one comparison is what rejects trailing garbage, a fourth field,
+// reordering, leading zeros, a leading plus and surrounding space, without a rule for
+// each: a stored hash either spells its parameters the way this package spells them or it
+// is not a hash this package wrote.
+func parseParams(segment string) (Params, error) {
+	fields := strings.Split(segment, ",")
+	if len(fields) != 3 {
+		return Params{}, fmt.Errorf("%w: parameter segment %q has %d fields, want 3", ErrMalformed, segment, len(fields))
+	}
+	var values [3]uint64
+	for i, prefix := range [3]string{"m=", "t=", "p="} {
+		if !strings.HasPrefix(fields[i], prefix) {
+			return Params{}, fmt.Errorf("%w: parameter %d is %q, want a %q field", ErrMalformed, i, fields[i], prefix)
+		}
+		v, err := strconv.ParseUint(strings.TrimPrefix(fields[i], prefix), 10, 32)
+		if err != nil {
+			return Params{}, fmt.Errorf("%w: parameter %q: %v", ErrMalformed, fields[i], err)
+		}
+		values[i] = v
+	}
+	if values[2] > 255 {
+		return Params{}, fmt.Errorf("%w: threads %d does not fit a uint8", ErrMalformed, values[2])
+	}
+	p := Params{Memory: uint32(values[0]), Time: uint32(values[1]), Threads: uint8(values[2])}
+	if canonical := p.segment(); canonical != segment {
+		return Params{}, fmt.Errorf("%w: parameter segment %q is not canonical, want %q", ErrMalformed, segment, canonical)
+	}
+	return p, p.validate()
+}
+
+// segment renders the canonical parameter spelling.
+func (p Params) segment() string {
+	return fmt.Sprintf("m=%d,t=%d,p=%d", p.Memory, p.Time, p.Threads)
 }
 
 func (p Params) validate() error {
@@ -168,19 +302,15 @@ func parse(encoded string) (Params, []byte, []byte, error) {
 		return Params{}, nil, nil, fmt.Errorf("%w: algorithm %q", ErrMalformed, parts[1])
 	}
 
-	var v int
-	if n, err := fmt.Sscanf(parts[2], "v=%d", &v); n != 1 || err != nil {
-		return Params{}, nil, nil, fmt.Errorf("%w: unreadable version %q", ErrMalformed, parts[2])
-	}
-	if v != version {
-		return Params{}, nil, nil, fmt.Errorf("%w: version %d, want %d", ErrMalformed, v, version)
+	// Exact string comparison rather than a scan: fmt.Sscanf reads the fields it is
+	// asked for and ignores whatever follows, so "v=19GARBAGE" and "m=...,p=04" both
+	// parsed clean. A stored hash has exactly one canonical spelling.
+	if parts[2] != versionSegment {
+		return Params{}, nil, nil, fmt.Errorf("%w: version segment %q, want %q", ErrMalformed, parts[2], versionSegment)
 	}
 
-	var p Params
-	if n, err := fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &p.Memory, &p.Time, &p.Threads); n != 3 || err != nil {
-		return Params{}, nil, nil, fmt.Errorf("%w: unreadable parameters %q", ErrMalformed, parts[3])
-	}
-	if err := p.validate(); err != nil {
+	p, err := parseParams(parts[3])
+	if err != nil {
 		return Params{}, nil, nil, err
 	}
 

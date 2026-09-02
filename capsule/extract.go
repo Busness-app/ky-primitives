@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 )
 
 // Extraction budgets. A capsule is written by this suite, so these bound what a hostile
@@ -39,10 +38,23 @@ func extractPayload(payload []byte, targetDir string) ([]File, error) {
 	budget := &countingReader{r: io.LimitReader(gr, maxCapsuleExpandedTotal+1), limit: maxCapsuleExpandedTotal}
 	tr := tar.NewReader(budget)
 
-	root, err := prepareTargetDir(targetDir)
+	root, created, err := prepareTargetDir(targetDir)
 	if err != nil {
 		return nil, err
 	}
+	if root != nil {
+		defer root.Close()
+	}
+	// Anything written before a failure is rolled back. The target has to be empty to
+	// begin with, so emptying it again restores exactly what was there — and without this
+	// a half-restored keyset stayed on disk and poisoned every retry with
+	// ErrTargetNotEmpty.
+	ok := false
+	defer func() {
+		if !ok {
+			rollback(root, targetDir, created)
+		}
+	}()
 
 	var files []File
 	for {
@@ -91,14 +103,35 @@ func extractPayload(payload []byte, targetDir string) ([]File, error) {
 		}
 		files = append(files, File{Path: cleanName, Content: data, Mode: mode})
 
-		if root != "" {
+		if root != nil {
 			if err := writeInto(root, cleanName, data, mode); err != nil {
 				return nil, err
 			}
 		}
 	}
 
+	ok = true
 	return files, nil
+}
+
+// rollback removes whatever a failed extraction wrote, returning the target to the empty
+// or absent state it had to be in for extraction to start.
+func rollback(root *os.Root, targetDir string, created bool) {
+	if root == nil {
+		return
+	}
+	if created {
+		root.Close()
+		_ = os.RemoveAll(targetDir)
+		return
+	}
+	entries, err := os.ReadDir(targetDir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		_ = root.RemoveAll(e.Name())
+	}
 }
 
 // countingReader fails the whole extraction once the archive has expanded past its budget,
@@ -135,61 +168,54 @@ func safeRelPath(name string) (string, error) {
 	return clean, nil
 }
 
-// prepareTargetDir returns the directory to unpack into, creating it if needed. An existing
+// prepareTargetDir returns a directory handle to unpack into, creating the directory if
+// needed, and reports whether this call created it. An existing
 // non-empty directory is refused: extracting over unknown contents is how a pre-planted
 // symlink gets a chance to redirect a write.
-func prepareTargetDir(targetDir string) (string, error) {
+func prepareTargetDir(targetDir string) (*os.Root, bool, error) {
 	if targetDir == "" {
-		return "", nil
+		return nil, false, nil
 	}
-	if err := os.MkdirAll(targetDir, 0700); err != nil {
-		return "", err
+	created := false
+	if _, err := os.Stat(targetDir); errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(targetDir, 0700); err != nil {
+			return nil, false, err
+		}
+		created = true
+	} else if err != nil {
+		return nil, false, err
 	}
+
 	entries, err := os.ReadDir(targetDir)
 	if err != nil {
-		return "", err
+		return nil, false, err
 	}
 	if len(entries) > 0 {
-		return "", fmt.Errorf("%w: %s", ErrTargetNotEmpty, targetDir)
+		return nil, false, fmt.Errorf("%w: %s", ErrTargetNotEmpty, targetDir)
 	}
-	// Resolve once, so every later containment check compares against a real path rather
-	// than one that still contains a symlinked component.
-	resolved, err := filepath.EvalSymlinks(targetDir)
+
+	// os.Root resolves every component against a directory descriptor, so no member can
+	// name a location outside it. The previous version checked parents by pathname with
+	// Lstat and reopened the final path afterwards, which a process able to swap a
+	// checked parent for a symlink could step through: O_NOFOLLOW only guards the last
+	// component. Go selects openat2 where the kernel has it and a checked openat walk
+	// where it does not, so this needs no minimum kernel of our own.
+	root, err := os.OpenRoot(targetDir)
 	if err != nil {
-		return "", err
+		return nil, false, err
 	}
-	return resolved, nil
+	return root, created, nil
 }
 
-// writeInto creates one archive member beneath root, refusing to follow any symlink and
-// refusing to overwrite an existing name.
-func writeInto(root, relPath string, data []byte, mode os.FileMode) error {
-	destPath := filepath.Join(root, relPath)
-	if destPath != root && !strings.HasPrefix(destPath, root+string(os.PathSeparator)) {
-		return fmt.Errorf("%w: %s", ErrPathTraversal, relPath)
-	}
-
-	// Build the parent chain a component at a time. MkdirAll would happily walk through a
-	// symlinked component that a previous entry (or a racing process) planted.
-	dir := root
-	for _, part := range strings.Split(filepath.Dir(relPath), string(os.PathSeparator)) {
-		if part == "." || part == "" {
-			continue
-		}
-		dir = filepath.Join(dir, part)
-		if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+// writeInto creates one archive member beneath root, refusing to overwrite an existing
+// name. Containment is the root handle's job, not a string comparison's.
+func writeInto(root *os.Root, relPath string, data []byte, mode os.FileMode) error {
+	if dir := filepath.Dir(relPath); dir != "." && dir != "" {
+		if err := root.MkdirAll(dir, 0700); err != nil {
 			return err
 		}
-		fi, err := os.Lstat(dir)
-		if err != nil {
-			return err
-		}
-		if !fi.IsDir() {
-			return fmt.Errorf("%w: %s is not a directory", ErrPathTraversal, dir)
-		}
 	}
-
-	f, err := os.OpenFile(destPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, mode)
+	f, err := root.OpenFile(relPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err
 	}

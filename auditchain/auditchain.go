@@ -84,6 +84,9 @@ func Resume(key []byte, last Record) (*Chain, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !validHash(last.Hash) || !validHash(last.Prev) {
+		return nil, fmt.Errorf("%w: record %d carries a hash that is not 64 lowercase hex characters", ErrBrokenChain, last.Seq)
+	}
 	if !hmac.Equal([]byte(digest(c.key, last.Seq, last.Prev, last.Fields)), []byte(last.Hash)) {
 		return nil, fmt.Errorf("%w: record %d does not carry its own digest", ErrBrokenChain, last.Seq)
 	}
@@ -91,16 +94,36 @@ func Resume(key []byte, last Record) (*Chain, error) {
 	return c, nil
 }
 
-// Append adds a record carrying fields and returns it for the caller to persist.
-func (c *Chain) Append(fields ...string) (Record, error) {
+// Append builds the next record, hands it and the anchor it produces to persist, and
+// advances the chain only if persist succeeds.
+//
+// Persistence is a parameter rather than the caller's next statement because the chain's
+// in-memory head is a claim about what is on disk. Advancing it first meant a failed
+// insert left the following record chained onto one that does not exist, and a record
+// stored without its anchor left the opposite inconsistency — with no way to roll either
+// back. persist runs under the same lock that reserves the sequence number, so it should
+// write the record and the anchor together and return.
+func (c *Chain) Append(persist func(Record, Anchor) error, fields ...string) (Record, error) {
+	if persist == nil {
+		return Record{}, errors.New("auditchain: a persist function is required; the chain cannot advance without knowing the record is stored")
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	rec := Record{
 		Seq:    c.count + 1,
 		Prev:   c.head,
 		Fields: append([]string(nil), fields...),
 	}
 	rec.Hash = digest(c.key, rec.Seq, rec.Prev, rec.Fields)
+
+	if err := persist(rec, Anchor{Count: rec.Seq, Hash: rec.Hash}); err != nil {
+		// Nothing has been mutated, so the next append reuses this sequence number and
+		// chains onto the last record that was actually stored.
+		return Record{}, err
+	}
+
 	c.count, c.head = rec.Seq, rec.Hash
 	return rec, nil
 }
@@ -136,6 +159,9 @@ func VerifyStream(key []byte, records iter.Seq2[Record, error], anchor Anchor) e
 	if len(key) < minKeyBytes {
 		return fmt.Errorf("%w, got %d", ErrWeakKey, len(key))
 	}
+	if !validHash(anchor.Hash) {
+		return fmt.Errorf("%w: anchor hash %q is not 64 lowercase hex characters", ErrBrokenChain, anchor.Hash)
+	}
 	prev := genesis
 	var count uint64
 	for rec, err := range records {
@@ -143,6 +169,9 @@ func VerifyStream(key []byte, records iter.Seq2[Record, error], anchor Anchor) e
 			return fmt.Errorf("auditchain: reading record %d: %w", count+1, err)
 		}
 		count++
+		if !validHash(rec.Hash) || !validHash(rec.Prev) {
+			return fmt.Errorf("%w: record %d carries a hash that is not 64 lowercase hex characters", ErrBrokenChain, count)
+		}
 		if rec.Seq != count {
 			return fmt.Errorf("%w: record %d carries sequence %d", ErrBrokenChain, count, rec.Seq)
 		}
@@ -160,10 +189,29 @@ func VerifyStream(key []byte, records iter.Seq2[Record, error], anchor Anchor) e
 		return fmt.Errorf("%w: %d records, anchor counted %d", ErrTruncated, count, anchor.Count)
 	case count > anchor.Count:
 		return fmt.Errorf("%w: %d records past an anchor counting %d", ErrBrokenChain, count, anchor.Count)
-	case prev != anchor.Hash && anchor.Count > 0:
+	case prev != anchor.Hash:
+		// Unconditional. An empty log leaves prev at the genesis hash, so an anchor
+		// claiming anything else is inconsistent with the log it anchors — and skipping
+		// the comparison there meant a corrupt zero-count anchor verified clean.
 		return fmt.Errorf("%w: head does not match the anchor", ErrBrokenChain)
 	}
 	return nil
+}
+
+// validHash reports whether s is the form this package emits: 64 lowercase hex
+// characters. Anything else came from somewhere other than digest, so comparing against
+// it compares against a value a caller or a corrupt store invented.
+func validHash(s string) bool {
+	if len(s) != 2*sha256.Size {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // digest length-prefixes every part, so no field content can be shifted into its

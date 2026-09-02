@@ -100,7 +100,8 @@ func TestCombineRejectsMismatchedLengths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	short := Share{Index: shares[1].Index, Value: shares[1].Value[:4]}
+	short := shares[1]
+	short.Value = short.Value[:4]
 	_, err = Combine([]Share{shares[0], short})
 	if !errors.Is(err, ErrShareLength) {
 		t.Fatalf("got %v, want ErrShareLength", err)
@@ -114,7 +115,9 @@ func TestCombineRejectsZeroIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = Combine([]Share{{Index: 0, Value: make([]byte, len(secret))}, shares[0]})
+	zero := shares[1]
+	zero.Index = 0
+	_, err = Combine([]Share{zero, shares[0]})
 	if !errors.Is(err, ErrShareIndex) {
 		t.Fatalf("got %v, want ErrShareIndex", err)
 	}
@@ -169,6 +172,7 @@ func TestShareStringRoundTrip(t *testing.T) {
 func TestParseShareRejectsMalformed(t *testing.T) {
 	for _, in := range []string{
 		"", "1", "1-", "-ff", "0-ffff", "zz-ffff", "1-fff", "1-zzzz", "256-ffff", "1-ffff-2",
+		"ky1-2-a1b2c3d4-0-ffff-0000", "ky1-2-a1b2c3d4-1-zz-0000", "ky1-1-a1b2c3d4-1-ffff-0000",
 	} {
 		if _, err := ParseShare(in); err == nil {
 			t.Errorf("ParseShare(%q) = nil error, want one", in)
@@ -176,13 +180,17 @@ func TestParseShareRejectsMalformed(t *testing.T) {
 	}
 }
 
-func TestParseShareAcceptsUppercaseAndSpace(t *testing.T) {
-	got, err := ParseShare("  2-A1B2  ")
+// Surrounding space is forgiven because a custodian types this off a card. Case is not:
+// the checksum covers the exact bytes, so folding case would mean either ignoring the
+// checksum or recomputing it over something the card does not say.
+func TestParseShareAcceptsSurroundingSpace(t *testing.T) {
+	want := Share{Threshold: 2, SetID: 0xa1b2c3d4, Index: 2, Value: []byte{0xa1, 0xb2}}
+	got, err := ParseShare("  " + want.String() + "  ")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Index != 2 || !bytes.Equal(got.Value, []byte{0xa1, 0xb2}) {
-		t.Fatalf("got %+v", got)
+	if got.String() != want.String() {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 
