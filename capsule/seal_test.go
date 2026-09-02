@@ -46,9 +46,13 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	}
 }
 
-// Seal must write the container kysignon-server already reads, or a migrated product
-// writes capsules the unmigrated ones cannot open.
-func TestSealWritesKycap1(t *testing.T) {
+// Seal writes kycap/2, which binds the manifest into the AEAD. kycap/1 is still read and
+// its fixtures still open, but it is no longer written: everything outside its ciphertext
+// was forgeable without the key.
+//
+// This is a one-way step. A product still on the old reader cannot open a kycap/2 capsule,
+// so readers migrate before writers do.
+func TestSealWritesKycap2(t *testing.T) {
 	raw, _, err := capsule.Seal("fixture", "0.0.0",
 		[]capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}, nil, nil, 2, 3)
 	if err != nil {
@@ -67,8 +71,8 @@ func TestSealWritesKycap1(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("Seal did not write JSON: %v", err)
 	}
-	if got.Format != capsule.KycapFileFormat {
-		t.Errorf("format %q, want %q", got.Format, capsule.KycapFileFormat)
+	if got.Format != capsule.KycapFileFormatV2 {
+		t.Errorf("format %q, want %q", got.Format, capsule.KycapFileFormatV2)
 	}
 	if got.Manifest.PayloadHash == "" {
 		t.Error("manifest carries no payload hash")

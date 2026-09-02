@@ -14,10 +14,19 @@ import (
 
 // Extraction budgets. A capsule is written by this suite, so these bound what a hostile
 // or corrupt archive can do rather than what a legitimate one needs.
+//
+// They are memory budgets, not archive sizes: Open holds the raw container, the decrypted
+// payload and every expanded member at once, so the real ceiling is a few times the number
+// below. The previous 4 GiB member and 8 GiB total were larger than the machines this runs
+// on, which meant a hostile capsule OOM-killed the process instead of receiving
+// ErrCapsuleTooLarge. A capsule holds keys and configuration; it is kilobytes in practice.
+//
+// ponytail: raise these only alongside a streaming Open that does not materialise every
+// member, because that is the thing the numbers are really standing in for.
 const (
 	maxCapsuleFiles         = 4096
-	maxCapsuleFileBytes     = int64(4 << 30) // 4 GiB for any single member
-	maxCapsuleExpandedTotal = int64(8 << 30) // 8 GiB across the whole archive
+	maxCapsuleFileBytes     = int64(64 << 20)  // 64 MiB for any single member
+	maxCapsuleExpandedTotal = int64(256 << 20) // 256 MiB across the whole archive
 )
 
 // extractPayload unpacks the decrypted gzipped tar into files, and onto disk when

@@ -14,12 +14,23 @@ import (
 	"time"
 )
 
-// KycapFileFormat identifies the JSON container this package writes.
+// KycapFileFormat identifies the legacy JSON container. It is still read, and no longer
+// written: everything outside its ciphertext is unauthenticated.
 const KycapFileFormat = "kycap/1"
 
-// maxContainerBytes bounds the tar container walk. The container holds three small
-// members; anything larger is either corrupt or hostile.
-const maxContainerBytes = int64(8 << 30)
+// KycapFileFormatV2 identifies the JSON container this package writes. It is kycap/1 with
+// the manifest bound into the AEAD as additional authenticated data.
+const KycapFileFormatV2 = "kycap/2"
+
+// Container member budgets for the tar walk. The three members are a small JSON manifest,
+// a 12-byte nonce and the sealed payload; nothing here is large, and a member that claims
+// to be is either corrupt or hostile.
+const (
+	maxManifestBytes  = int64(1 << 20) // 1 MiB of JSON is already absurd for a manifest
+	maxNonceBytes     = int64(64)      // a GCM nonce is 12
+	maxSealedBytes    = maxCapsuleExpandedTotal + (1 << 20)
+	maxContainerFiles = 16
+)
 
 // manifest carries the fields both containers agree on. Each container has extra fields
 // of its own, but only these are needed to decrypt and verify.
@@ -37,11 +48,18 @@ type manifest struct {
 	VerificationRecipe any `json:"verification_recipe,omitempty"`
 }
 
-// kycapFile is the kycap/1 JSON container.
+// kycapFile is the JSON container, in both versions.
+//
+// Manifest is kept as raw bytes rather than a decoded struct because in kycap/2 those
+// exact bytes are the additional authenticated data. Re-encoding a decoded manifest to
+// rebuild the AAD would have to reproduce the writer's spelling byte for byte — field
+// order, number formatting, the interface{} shape of dependencies — and any drift there
+// fails every capsule rather than any forgery. The bytes that were read are the bytes
+// that are authenticated.
 type kycapFile struct {
-	Format     string   `json:"format"`
-	Manifest   manifest `json:"manifest"`
-	Ciphertext string   `json:"ciphertext"`
+	Format     string          `json:"format"`
+	Manifest   json.RawMessage `json:"manifest"`
+	Ciphertext string          `json:"ciphertext"`
 }
 
 // decryptPayload dispatches on container type and returns the decrypted, hash-verified
@@ -63,18 +81,32 @@ func decryptPayload(raw, key []byte) ([]byte, error) {
 	return decryptTarContainer(raw, key)
 }
 
-// decryptKycap1 reads kysignon-server's JSON container: nonce prefixed to the ciphertext,
-// no additional authenticated data.
+// decryptKycap1 reads the JSON container in either version: nonce prefixed to the
+// ciphertext, and in kycap/2 the manifest bytes bound in as AAD.
 func decryptKycap1(raw, key []byte) ([]byte, error) {
 	var cf kycapFile
 	if err := json.Unmarshal(raw, &cf); err != nil {
 		return nil, fmt.Errorf("%w: not readable as %s: %v", ErrUnknownContainer, KycapFileFormat, err)
 	}
-	if cf.Format != KycapFileFormat {
+	// aad stays nil for kycap/1. Binding the manifest there would break every capsule
+	// already on disk, which was written without it.
+	var aad []byte
+	switch cf.Format {
+	case KycapFileFormat:
+	case KycapFileFormatV2:
+		aad = cf.Manifest
+	default:
 		return nil, fmt.Errorf("%w: unsupported capsule format %q", ErrUnknownContainer, cf.Format)
 	}
 	if cf.Ciphertext == "" {
 		return nil, fmt.Errorf("%w: container carries no ciphertext", ErrCorruptCapsule)
+	}
+	if int64(len(cf.Manifest)) > maxManifestBytes {
+		return nil, fmt.Errorf("%w: manifest is %d bytes", ErrCorruptCapsule, len(cf.Manifest))
+	}
+	var m manifest
+	if err := json.Unmarshal(cf.Manifest, &m); err != nil {
+		return nil, fmt.Errorf("%w: unreadable manifest: %v", ErrCorruptCapsule, err)
 	}
 
 	sealed, err := DecodeCiphertext(cf.Ciphertext)
@@ -91,11 +123,11 @@ func decryptKycap1(raw, key []byte) ([]byte, error) {
 	}
 	nonce, ct := sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():]
 
-	payload, err := gcm.Open(nil, nonce, ct, nil)
+	payload, err := gcm.Open(nil, nonce, ct, aad)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decrypt capsule: %w", err)
 	}
-	return payload, verifyPayloadHash(payload, cf.Manifest.PayloadHash)
+	return payload, verifyPayloadHash(payload, m.PayloadHash)
 }
 
 // decryptTarContainer reads kyrecovery-server's tar container: nonce in its own member,
@@ -103,8 +135,23 @@ func decryptKycap1(raw, key []byte) ([]byte, error) {
 func decryptTarContainer(raw, key []byte) ([]byte, error) {
 	var manifestBytes, nonce, sealed []byte
 
+	// Each member gets the budget its role justifies, and a member this container has no
+	// use for is drained rather than read. Reading every member into a buffer before
+	// discarding it let a tar of large junk members allocate without bound while none of
+	// it was ever used, and a single per-member limit of the whole payload size meant the
+	// budget never applied to the archive as a whole.
+	limits := map[string]int64{
+		"manifest.json": maxManifestBytes,
+		"nonce.bin":     maxNonceBytes,
+		"payload.enc":   maxSealedBytes,
+	}
+	seen := make(map[string]bool, len(limits))
+
 	tr := tar.NewReader(bytes.NewReader(raw))
-	for {
+	for members := 0; ; members++ {
+		if members >= maxContainerFiles {
+			return nil, fmt.Errorf("%w: more than %d members", ErrUnknownContainer, maxContainerFiles)
+		}
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
 			break
@@ -112,9 +159,29 @@ func decryptTarContainer(raw, key []byte) ([]byte, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrUnknownContainer, err)
 		}
-		data, err := io.ReadAll(io.LimitReader(tr, maxContainerBytes))
+
+		limit, wanted := limits[hdr.Name]
+		if !wanted {
+			// Drained, not buffered: an unknown member must cost the walk nothing but the
+			// time to skip it.
+			if _, err := io.Copy(io.Discard, tr); err != nil {
+				return nil, fmt.Errorf("%w: %v", ErrUnknownContainer, err)
+			}
+			continue
+		}
+		// A repeated member is ambiguous about which copy is authentic, and last-one-wins
+		// let a hostile tar append its own manifest after the real one.
+		if seen[hdr.Name] {
+			return nil, fmt.Errorf("%w: %s appears twice", ErrCorruptCapsule, hdr.Name)
+		}
+		seen[hdr.Name] = true
+
+		data, err := io.ReadAll(io.LimitReader(tr, limit+1))
 		if err != nil {
 			return nil, err
+		}
+		if int64(len(data)) > limit {
+			return nil, fmt.Errorf("%w: %s exceeds %d bytes", ErrCapsuleTooLarge, hdr.Name, limit)
 		}
 		switch hdr.Name {
 		case "manifest.json":
