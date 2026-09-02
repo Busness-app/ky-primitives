@@ -421,3 +421,14 @@ slot really is a core. The budget is `derive`'s own rather than `password`'s bec
 package is standard-library-only by design and importing `password` would pull `x/crypto`
 into it. `SyntheticSalt` lower-cases the username, because keying anything off the raw string
 lets one account present as many and quietly multiplies any per-account budget above it.
+
+## Contributing
+
+`.github/workflows/downstream.yml` builds and tests every consumer against your pull
+request. A breaking change fails there, in your PR, rather than months later in a product
+nobody rebuilt.
+
+To land a change that breaks a consumer, open a branch with the same name in the consumer
+repository. The job pairs them by branch name and tests the two together.
+
+The job needs a `SUITE_READ_TOKEN` secret with `contents: read` on the organisation.
