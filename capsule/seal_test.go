@@ -22,7 +22,7 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	}
 
 	dir := filepath.Join(t.TempDir(), "restore")
-	got, err := capsule.Open(raw, key, dir)
+	_, got, err := capsule.Open(raw, key, dir)
 	if err != nil {
 		t.Fatal(err)
 	}

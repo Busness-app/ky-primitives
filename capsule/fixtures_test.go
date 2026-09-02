@@ -25,7 +25,7 @@ func TestOpensEveryPersistedCapsule(t *testing.T) {
 		t.Run(filepath.Base(p), func(t *testing.T) {
 			raw, key := loadFixture(t, p)
 
-			files, err := capsule.Open(raw, key, filepath.Join(t.TempDir(), "restore"))
+			_, files, err := capsule.Open(raw, key, filepath.Join(t.TempDir(), "restore"))
 			if err != nil {
 				t.Fatalf("a capsule written by an earlier version of this package failed to open: %v", err)
 			}
@@ -47,7 +47,7 @@ func TestOpenRejectsWrongKey(t *testing.T) {
 			raw, key := loadFixture(t, p)
 			key[0] ^= 0xFF
 
-			if _, err := capsule.Open(raw, key, ""); err == nil {
+			if _, _, err := capsule.Open(raw, key, ""); err == nil {
 				t.Fatal("a capsule opened with the wrong key")
 			}
 		})
@@ -61,7 +61,7 @@ func TestOpenRejectsTamperedContainer(t *testing.T) {
 			raw, key := loadFixture(t, p)
 			raw[len(raw)/2] ^= 0xFF
 
-			if _, err := capsule.Open(raw, key, ""); err == nil {
+			if _, _, err := capsule.Open(raw, key, ""); err == nil {
 				t.Fatal("a tampered capsule opened cleanly")
 			}
 		})
@@ -78,7 +78,7 @@ func TestOpenRejectsRetiredContainers(t *testing.T) {
 		"tar":     append([]byte("manifest.json\x00"), make([]byte, 1024)...),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := capsule.Open(raw, make([]byte, 32), ""); err == nil {
+			if _, _, err := capsule.Open(raw, make([]byte, 32), ""); err == nil {
 				t.Fatalf("a retired %s container opened", name)
 			}
 		})
@@ -93,7 +93,7 @@ func TestOpenRejectsUnknownContainer(t *testing.T) {
 		"wrong json": []byte(`{"format":"kycap/99","manifest":{},"ciphertext":"AAAA"}`),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := capsule.Open(raw, make([]byte, 32), ""); err == nil {
+			if _, _, err := capsule.Open(raw, make([]byte, 32), ""); err == nil {
 				t.Fatalf("%q opened as a capsule", name)
 			}
 		})

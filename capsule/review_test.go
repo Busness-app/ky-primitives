@@ -62,7 +62,7 @@ func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("the limit itself was refused: %v", err)
 		}
-		got, err := Open(raw, key, "")
+		_, got, err := Open(raw, key, "")
 		if err != nil {
 			t.Fatalf("Open refused a capsule Seal wrote: %v", err)
 		}
@@ -127,7 +127,7 @@ func TestAFailedExtractionLeavesNothingBehind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(raw, key, target); err != nil {
+	if _, _, err := Open(raw, key, target); err != nil {
 		t.Fatalf("retry after a failed restore: %v", err)
 	}
 }
@@ -152,7 +152,7 @@ func TestExtractionCannotEscapeThroughASymlinkedParent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(raw, key, target); err == nil {
+	if _, _, err := Open(raw, key, target); err == nil {
 		t.Fatal("extracted into a target holding a symlinked parent")
 	}
 	if _, err := os.Stat(filepath.Join(outside, "stolen.txt")); err == nil {

@@ -42,18 +42,27 @@ type File struct {
 	Mode    os.FileMode
 }
 
-// Open parses a capsule of either container, decrypts it, verifies the payload hash, and
-// returns its files. When targetDir is non-empty the files are also written there under
-// the containment rules described in extract.go; the directory must be empty or absent.
+// Open parses a kycap/2 container, decrypts it, verifies the payload hash, and returns the
+// authenticated manifest with the files. When targetDir is non-empty the files are also
+// written there under the containment rules in extract.go; the directory must be empty or
+// absent. When it is empty nothing is written and the files are returned in memory.
+//
+// The manifest is returned because a successful Open is the only proof it was not
+// rewritten. Callers that want it without a key want ReadUnverifiedManifest, and should
+// read that type's doc comment first.
 //
 // key is raw bytes, never a hex string. The suite's implementations disagree on that
 // (ky_server_base passes hex, kysignon-server passes bytes) and bytes is the one that
 // cannot be got wrong silently: a hex string of the right length is a valid 64-byte key
 // that simply decrypts to garbage.
-func Open(raw, key []byte, targetDir string) ([]File, error) {
-	payload, err := decryptPayload(raw, key)
+func Open(raw, key []byte, targetDir string) (Manifest, []File, error) {
+	m, payload, err := decryptPayload(raw, key)
 	if err != nil {
-		return nil, err
+		return Manifest{}, nil, err
 	}
-	return extractPayload(payload, targetDir)
+	files, err := extractPayload(payload, targetDir)
+	if err != nil {
+		return Manifest{}, nil, err
+	}
+	return Manifest{UnverifiedManifest: m}, files, nil
 }

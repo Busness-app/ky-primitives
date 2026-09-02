@@ -80,31 +80,31 @@ func parseContainer(raw []byte) (kycapFile, error) {
 }
 
 // decryptPayload parses the container, decrypts it under the manifest, and returns the
-// hash-verified gzipped tar payload.
-func decryptPayload(raw, key []byte) ([]byte, error) {
+// authenticated manifest alongside the hash-verified gzipped tar payload.
+func decryptPayload(raw, key []byte) (manifest, []byte, error) {
 	cf, err := parseContainer(raw)
 	if err != nil {
-		return nil, err
+		return manifest{}, nil, err
 	}
 	if cf.Ciphertext == "" {
-		return nil, fmt.Errorf("%w: container carries no ciphertext", ErrCorruptCapsule)
+		return manifest{}, nil, fmt.Errorf("%w: container carries no ciphertext", ErrCorruptCapsule)
 	}
 	var m manifest
 	if err := json.Unmarshal(cf.Manifest, &m); err != nil {
-		return nil, fmt.Errorf("%w: unreadable manifest: %v", ErrCorruptCapsule, err)
+		return manifest{}, nil, fmt.Errorf("%w: unreadable manifest: %v", ErrCorruptCapsule, err)
 	}
 
 	sealed, err := DecodeCiphertext(cf.Ciphertext)
 	if err != nil {
-		return nil, err
+		return manifest{}, nil, err
 	}
 
 	gcm, err := newGCM(key)
 	if err != nil {
-		return nil, err
+		return manifest{}, nil, err
 	}
 	if len(sealed) < gcm.NonceSize() {
-		return nil, fmt.Errorf("%w: ciphertext shorter than its nonce", ErrCorruptCapsule)
+		return manifest{}, nil, fmt.Errorf("%w: ciphertext shorter than its nonce", ErrCorruptCapsule)
 	}
 	nonce, ct := sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():]
 
@@ -112,9 +112,12 @@ func decryptPayload(raw, key []byte) ([]byte, error) {
 	// rather than being handed to the caller as fact.
 	payload, err := gcm.Open(nil, nonce, ct, cf.Manifest)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt capsule: %w", err)
+		return manifest{}, nil, fmt.Errorf("failed to decrypt capsule: %w", err)
 	}
-	return payload, verifyPayloadHash(payload, m.PayloadHash)
+	if err := verifyPayloadHash(payload, m.PayloadHash); err != nil {
+		return manifest{}, nil, err
+	}
+	return m, payload, nil
 }
 
 func checkContainerSize(part string, size int) error {

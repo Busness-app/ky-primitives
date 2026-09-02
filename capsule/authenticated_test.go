@@ -38,7 +38,7 @@ func TestOpenRejectsATamperedManifest(t *testing.T) {
 			}
 			tampered := bytes.Replace(raw, []byte(edit.from), []byte(edit.to), 1)
 
-			if _, err := capsule.Open(tampered, key, ""); err == nil {
+			if _, _, err := capsule.Open(tampered, key, ""); err == nil {
 				t.Fatalf("a capsule opened after its %s was rewritten without the key", name)
 			}
 		})
@@ -53,7 +53,7 @@ func TestOpenAcceptsAnUntamperedManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := capsule.Open(raw, key, ""); err != nil {
+	if _, _, err := capsule.Open(raw, key, ""); err != nil {
 		t.Fatalf("a capsule this package just sealed did not open: %v", err)
 	}
 }
