@@ -1344,9 +1344,15 @@ Run: `go test ./password/ -run TestDummyVerifyDoesNotPanic -count=20 -v`
 Expected: PASS, and the whole run takes roughly one derivation's time plus twenty
 verifications — not twenty mintings. If it scales with `-count`, the memo is not holding.
 
-Then prove the failure mode I got wrong is actually gone: write a throwaway probe that
-holds the whole derivation budget and calls `DummyVerify` twice. The first call must not
-poison the second. Paste its output, then delete the probe.
+Then pin the failure mode I got wrong, as a **committed test**, not a throwaway. It holds
+the whole derivation budget, calls `DummyVerify` twice, and asserts neither panics and that
+the second sees the same memoised value as the first. It must fail if `dummyMint` ever
+starts acquiring the budget again.
+
+A security property proved once by a probe that is then deleted is unproven from the next
+commit onward — and routing the mint back through the budget is exactly the mistake that
+produced the bug. Make the test release the budget even on failure; one that leaves it held
+poisons every test after it.
 
 - [ ] **Step 6: Commit**
 
