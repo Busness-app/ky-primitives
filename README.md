@@ -10,8 +10,8 @@ broke it: the suite standardised on it for password hashing, and it is neither i
 standard library nor on a proposal track.
 
 Two tests hold that line. `TestModuleDependenciesAreAllowlisted` fails on any `require`
-outside the budget; `TestOnlyPasswordImportsADependency` fails if `capsule`, `shamir` or
-`auditchain` ever import one. A consumer that only wants `capsule` compiles none of
+outside the budget; `TestOnlyPasswordImportsADependency` discovers every other package and
+fails if any of them imports one. A consumer that only wants `capsule` compiles none of
 `x/crypto`, but it does inherit the requirement in its own `go.mod` — that is the cost.
 
 `go list -m all` names five `golang.org/x` modules because they sit in `x/crypto`'s own
@@ -215,3 +215,106 @@ stale, err := password.NeedsRehash(encoded)     // upgrade on next successful lo
 
 `Verify` accepts a weaker-but-valid hash so a deployment rehashes on login instead of
 locking everyone out. Pair it with `NeedsRehash`; no Argon2 repo in the suite had either.
+
+## totp
+
+RFC 6238 one-time passwords. Pinned to the published RFC 4226 Appendix D vectors, so the
+construction is checked against a document rather than against itself.
+
+All four implementations in the suite agreed on the arithmetic — HMAC-SHA1, 20-byte secret,
+6 digits, 30-second period — so **enrolled secrets stay valid across a migration onto this
+one**. They disagreed on everything around it, and two of those differences outlive the
+request.
+
+`ky_server_base` and `gridlock-server` build the enrolment URI by interpolation:
+
+```go
+fmt.Sprintf("otpauth://totp/%s:%s?secret=%s&issuer=%s&...", issuer, accountName, secret, issuer)
+```
+
+An account name carrying a `?` starts the query string early. Parsed:
+
+```
+account = "x?secret=ATTACKERAAAAAAAA&digits=8"
+  enrolled secret -> ATTACKERAAAAAAAA        digits -> 8
+```
+
+The user's phone holds a secret the server never issued, until they re-enrol. Nothing
+errors. `ProvisioningURI` escapes the label and builds the query with `url.Values`.
+
+The same two return a bare `bool` from validation, so a caller cannot know which step
+matched and cannot spend it — a phished code stays live for the full 90-second window.
+`Validate` returns the counter:
+
+```go
+counter, ok := totp.Validate(secret, code, time.Now())  // record counter, refuse a repeat
+uri := totp.ProvisioningURI(issuer, account, secret)
+```
+
+## recoverycode
+
+One-time codes that bypass every other factor, so their strength is the account's strength.
+
+`ky_server_base`, `gridlock-server` and `kysignon-server` issue 8 symbols over a 32-symbol
+alphabet — **40 bits** — and store them as a bare SHA-256. That is searchable offline by
+anyone who reads the store. This package issues 12 symbols: 60 bits.
+
+Hashing and storage stay with the caller; the products disagree about the hash for reasons
+this package cannot settle, and it is not what diverged dangerously. What is here is
+generation, the normalisation both sides of a comparison must agree on, and `Match`, which
+scans every entry instead of breaking on the first hit — `ky_server_base`'s redeem loop
+reports the matching code's position in the list through its timing. An empty stored entry
+is a redeemed slot and never matches, so a caller blanks in place rather than removing and
+renumbering, which is how two concurrent redemptions lose each other's write.
+
+## keyfile
+
+Loads a long-lived secret from disk, creating it on first use. Seven products did this
+seven ways:
+
+| Product | On a corrupt key file | First-boot race | fsync |
+|---|---|---|---|
+| `kynotes-server` | **continues with an empty secret** | unguarded | no |
+| `kypassword-server` | **regenerates, orphaning every old record** | unguarded | no |
+| `kysignon-server` | refuses to start | unguarded | no |
+| `kyrecovery-server` | refuses | `O_EXCL` | no |
+| `kypost-server` | refuses | mutex + recheck | yes |
+
+This package refuses rather than guesses: an existing file that does not decode to exactly
+the expected size is an error and is left untouched. `O_EXCL` settles the cross-process
+race, and the loser re-reads the winner's key rather than returning one that was never
+persisted. The file and its directory are both fsynced, because a crash after first boot
+otherwise leaves a zero-length file that the refusal above then reports forever.
+
+`RequireOwnerOnly` is exported separately. Nothing in the suite checked that a key file is
+still `0600`, so one relaxed by a stray chmod or a restore kept being used as though it
+were secret.
+
+```go
+key, err := keyfile.LoadOrCreate(filepath.Join(dir, "audit.key"), 32)
+```
+
+## derive
+
+The login secret a client sends in place of a password: PBKDF2-SHA256 stretched, then
+HKDF-SHA256 expanded under a per-product label.
+
+`kynotes-server` and `kypost-server` both do this, each mirroring a **browser-side
+TypeScript implementation**. That makes it a contract across four programs rather than a
+helper — change any byte and every user is locked out. The golden vectors in the test were
+produced by running `kynotes-server`'s implementation, not this one, and they pass, so that
+product can adopt this package without a single login breaking.
+
+Both existing copies import `golang.org/x/crypto/pbkdf2` and `.../hkdf`. Both moved into
+the standard library in Go 1.24, so **adopting this package deletes a dependency from each
+rather than adding one** — which is the only reason it can live here at all.
+
+```go
+secret, err := derive.AuthSecret(password, saltB64, iterations, "kynotes/auth/v1")
+salt := derive.SyntheticSalt(pairingKey, "login-salt/v1", username)
+```
+
+Iterations are bounded to 100,000–12,000,000, the range both products already agreed on: the
+value arrives from a client or a stored record, and unbounded it buys minutes of CPU per
+login. `SyntheticSalt` lower-cases the username, because keying anything off the raw string
+lets one account present as many and quietly multiplies any per-account budget above it.
