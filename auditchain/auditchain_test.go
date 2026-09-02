@@ -162,3 +162,103 @@ func TestAnchorTracksTheChain(t *testing.T) {
 		t.Fatalf("anchor is %+v, want count 1 and hash %s", got, rec.Hash)
 	}
 }
+
+// A real chain reached six figures: kyrecovery-server's VerifyChain fetched a fixed
+// 100000 events and then reported a sequence gap on a healthy log. Verifying must not
+// require holding the whole chain in memory.
+func TestVerifyStreamAcceptsAnIntactChain(t *testing.T) {
+	records := build(t, []string{"a"}, []string{"b"}, []string{"c"})
+	anchor := Anchor{Count: 3, Hash: records[2].Hash}
+	if err := VerifyStream(key, iterOf(records...), anchor); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestVerifyStreamAndVerifyAgree(t *testing.T) {
+	records := build(t, []string{"a"}, []string{"b"}, []string{"c"})
+	anchor := Anchor{Count: 3, Hash: records[2].Hash}
+	records[1].Fields[0] = "tampered"
+
+	slice := Verify(key, records, anchor)
+	stream := VerifyStream(key, iterOf(records...), anchor)
+	if (slice == nil) != (stream == nil) {
+		t.Fatalf("Verify returned %v but VerifyStream returned %v", slice, stream)
+	}
+	if !errors.Is(stream, ErrBrokenChain) {
+		t.Fatalf("got %v, want ErrBrokenChain", stream)
+	}
+}
+
+func TestVerifyStreamDetectsTruncation(t *testing.T) {
+	records := build(t, []string{"a"}, []string{"b"}, []string{"c"})
+	anchor := Anchor{Count: 3, Hash: records[2].Hash}
+	if err := VerifyStream(key, iterOf(records[:2]...), anchor); !errors.Is(err, ErrTruncated) {
+		t.Fatalf("got %v, want ErrTruncated", err)
+	}
+}
+
+// A store that fails mid-walk must fail the verification, not silently shorten the chain
+// into a truncation report or, worse, a pass.
+func TestVerifyStreamPropagatesASourceError(t *testing.T) {
+	records := build(t, []string{"a"}, []string{"b"})
+	boom := errors.New("database went away")
+	seq := func(yield func(Record, error) bool) {
+		yield(records[0], nil)
+		yield(Record{}, boom)
+	}
+	err := VerifyStream(key, seq, Anchor{Count: 2, Hash: records[1].Hash})
+	if !errors.Is(err, boom) {
+		t.Fatalf("got %v, want the source error", err)
+	}
+}
+
+func TestVerifyStreamHandlesAChainLargerThanTheDonorsPageSize(t *testing.T) {
+	const n = 100_001
+	var head Record
+	count := 0
+	for rec, err := range generatedChain(n) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		head, count = rec, count+1
+	}
+	if count != n {
+		t.Fatalf("generated %d records, want %d", count, n)
+	}
+	// Append is deterministic, so the same chain regenerates identically and can be
+	// verified holding one record at a time rather than all 100001.
+	if err := VerifyStream(key, generatedChain(n), Anchor{Count: n, Hash: head.Hash}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// generatedChain yields a chain without ever holding it.
+func generatedChain(n int) func(func(Record, error) bool) {
+	return func(yield func(Record, error) bool) {
+		c, err := New(key)
+		if err != nil {
+			yield(Record{}, err)
+			return
+		}
+		for i := 0; i < n; i++ {
+			rec, err := c.Append("event")
+			if err != nil {
+				yield(Record{}, err)
+				return
+			}
+			if !yield(rec, nil) {
+				return
+			}
+		}
+	}
+}
+
+func iterOf(records ...Record) func(func(Record, error) bool) {
+	return func(yield func(Record, error) bool) {
+		for _, r := range records {
+			if !yield(r, nil) {
+				return
+			}
+		}
+	}
+}
