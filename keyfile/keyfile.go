@@ -18,6 +18,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +31,8 @@ var (
 	ErrUnreadable = errors.New("keyfile: existing key file is unreadable and will not be replaced")
 	// ErrPermissive reports a key file that some account other than its owner can read.
 	ErrPermissive = errors.New("keyfile: key file is readable beyond its owner")
+	// ErrUnsafe reports a key path that is not a regular file owned by this process's user.
+	ErrUnsafe = errors.New("keyfile: key path is not a regular file owned by the current user")
 )
 
 // minSize is the floor for a secret worth persisting. A shorter one is a mistake in the
@@ -76,9 +79,17 @@ func LoadOrCreate(path string, size int) ([]byte, error) {
 // the suite checked this, so a key file relaxed to 0644 by a stray chmod or a restore
 // kept being used as though it were secret.
 func RequireOwnerOnly(path string) error {
-	fi, err := os.Stat(path)
+	f, fi, err := openKey(path)
 	if err != nil {
-		return fmt.Errorf("keyfile: %w", err)
+		return err
+	}
+	f.Close()
+	return checkKeyInfo(fi)
+}
+
+func checkKeyInfo(fi os.FileInfo) error {
+	if !fi.Mode().IsRegular() || !ownedByCurrentUser(fi) {
+		return fmt.Errorf("%w: %s", ErrUnsafe, fi.Name())
 	}
 	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
 		return fmt.Errorf("%w: mode is %04o, want 0600", ErrPermissive, perm)
@@ -87,11 +98,16 @@ func RequireOwnerOnly(path string) error {
 }
 
 func read(path string, size int) ([]byte, error) {
-	raw, err := os.ReadFile(path)
+	f, fi, err := openKey(path)
 	if err != nil {
 		return nil, err
 	}
-	if err := RequireOwnerOnly(path); err != nil {
+	defer f.Close()
+	if err := checkKeyInfo(fi); err != nil {
+		return nil, err
+	}
+	raw, err := io.ReadAll(f)
+	if err != nil {
 		return nil, err
 	}
 	key, err := hex.DecodeString(strings.TrimSpace(string(raw)))
@@ -102,6 +118,31 @@ func read(path string, size int) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %s holds %d bytes, expected %d", ErrUnreadable, path, len(key), size)
 	}
 	return key, nil
+}
+
+// openKey rejects symlinks and verifies that the file opened is the same object inspected,
+// closing the pathname swap between validation and use.
+func openKey(path string) (*os.File, os.FileInfo, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("keyfile: %w", err)
+	}
+	if before.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, fmt.Errorf("%w: %s is a symlink", ErrUnsafe, path)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("keyfile: %w", err)
+	}
+	after, err := f.Stat()
+	if err != nil || !os.SameFile(before, after) {
+		f.Close()
+		if err != nil {
+			return nil, nil, fmt.Errorf("keyfile: %w", err)
+		}
+		return nil, nil, fmt.Errorf("%w: %s changed while opening", ErrUnsafe, path)
+	}
+	return f, after, nil
 }
 
 // writeAll is indirected so the failed-write test can produce a real short write.

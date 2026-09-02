@@ -31,7 +31,7 @@ func main() {
 }
 
 func run() error {
-	key := flag.String("key", "", "chain key as hex, or @path to a file holding it")
+	key := flag.String("key", "", "@path to a file holding the chain key as hex")
 	anchor := flag.String("anchor", "", "recorded anchor as count:hash")
 	flag.Parse()
 
@@ -88,17 +88,14 @@ func records(r io.Reader) func(func(auditchain.Record, error) bool) {
 }
 
 func loadKey(spec string) ([]byte, error) {
-	if spec == "" {
-		return nil, errors.New("-key is required")
+	if !strings.HasPrefix(spec, "@") || len(spec) == 1 {
+		return nil, errors.New("-key must be @path; inline secrets are exposed in process listings and shell history")
 	}
-	if strings.HasPrefix(spec, "@") {
-		data, err := os.ReadFile(spec[1:])
-		if err != nil {
-			return nil, err
-		}
-		spec = strings.TrimSpace(string(data))
+	data, err := os.ReadFile(spec[1:])
+	if err != nil {
+		return nil, err
 	}
-	return hex.DecodeString(spec)
+	return hex.DecodeString(strings.TrimSpace(string(data)))
 }
 
 func parseAnchor(spec string) (auditchain.Anchor, error) {

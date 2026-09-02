@@ -42,6 +42,10 @@ const Version = "ky2"
 // share, so there are no cards to strand.
 const setIDBytes = 16
 
+// MaxSecretBytes bounds memory and CPU when shares come from an untrusted decoder. Recovery
+// secrets are normally tens of bytes; 1 MiB leaves ample room for other uses.
+const MaxSecretBytes = 1 << 20
+
 var (
 	// ErrNotEnoughShares reports fewer shares than the threshold the shares themselves
 	// declare.
@@ -147,6 +151,8 @@ func Split(secret []byte, threshold, total int) ([]Share, error) {
 	switch {
 	case len(secret) == 0:
 		return nil, errors.New("shamir: refusing to split an empty secret")
+	case len(secret) > MaxSecretBytes:
+		return nil, fmt.Errorf("shamir: secret is %d bytes, limit is %d", len(secret), MaxSecretBytes)
 	case threshold < 2:
 		return nil, errors.New("shamir: threshold must be at least 2")
 	case threshold > total:
@@ -204,6 +210,9 @@ func Combine(shares []Share) ([]byte, error) {
 	size := len(shares[0].Value)
 	if size == 0 {
 		return nil, ErrShareLength
+	}
+	if size > MaxSecretBytes {
+		return nil, fmt.Errorf("%w: share is %d bytes, limit is %d", ErrShareLength, size, MaxSecretBytes)
 	}
 	var seen [256]bool
 	for _, s := range shares {

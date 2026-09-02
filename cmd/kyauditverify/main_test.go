@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -70,5 +72,19 @@ func TestParseAnchor(t *testing.T) {
 	}
 	if _, err := parseAnchor("nope"); err == nil {
 		t.Fatal("anchor without a colon should be rejected")
+	}
+}
+
+func TestLoadKeyRequiresAFile(t *testing.T) {
+	if _, err := loadKey("0123456789abcdef"); err == nil {
+		t.Fatal("inline key was accepted")
+	}
+	path := filepath.Join(t.TempDir(), "audit.key")
+	if err := os.WriteFile(path, []byte("0123456789abcdef"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	key, err := loadKey("@" + path)
+	if err != nil || len(key) != 8 {
+		t.Fatalf("file key = %x, %v", key, err)
 	}
 }
