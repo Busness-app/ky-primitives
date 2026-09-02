@@ -113,9 +113,10 @@ var budget = struct {
 
 // withMemory runs fn holding a reservation of kib, or reports ErrBusy.
 //
-// Acquirers are serialised through admit so that no two can each hold part of what the
-// other needs, which is the deadlock a naive multi-token semaphore has. It also makes the
-// queue first-come rather than letting small requests starve a large one.
+// Reservations are serialised through admit so that no two acquirers can each hold part of
+// what the other needs, which is the deadlock a naive multi-token semaphore has. It also
+// makes the queue first-come rather than letting small requests starve a large one. Only
+// the reservation is serialised; the derivation itself runs outside the queue.
 func withMemory(kib int64, fn func()) error {
 	if kib > budgetKiB {
 		// Unsatisfiable however long we wait, so say so now rather than after maxWait.
@@ -129,19 +130,14 @@ func withMemory(kib int64, fn func()) error {
 	case <-timer.C:
 		return ErrBusy
 	}
-	acquired := false
-	defer func() {
-		<-budget.admit
-		if acquired {
-			budget.mu.Lock()
-			budget.free += kib
-			budget.mu.Unlock()
-			select {
-			case budget.wake <- struct{}{}:
-			default:
-			}
+	admitted := true
+	leaveQueue := func() {
+		if admitted {
+			admitted = false
+			<-budget.admit
 		}
-	}()
+	}
+	defer leaveQueue()
 
 	for {
 		budget.mu.Lock()
@@ -151,7 +147,11 @@ func withMemory(kib int64, fn func()) error {
 				budget.peak = used
 			}
 			budget.mu.Unlock()
-			acquired = true
+			// Admit is the queue, not the reservation. Deriving while holding it capped
+			// the package at one derivation at a time whatever the budget allowed, and
+			// left the wait below unreachable.
+			leaveQueue()
+			defer releaseMemory(kib)
 			fn()
 			return nil
 		}
@@ -162,6 +162,17 @@ func withMemory(kib int64, fn func()) error {
 		case <-timer.C:
 			return ErrBusy
 		}
+	}
+}
+
+// releaseMemory returns a reservation and wakes whoever is queued behind it.
+func releaseMemory(kib int64) {
+	budget.mu.Lock()
+	budget.free += kib
+	budget.mu.Unlock()
+	select {
+	case budget.wake <- struct{}{}:
+	default:
 	}
 }
 

@@ -57,6 +57,11 @@ func extractPayload(payload []byte, targetDir string) ([]File, error) {
 	}()
 
 	var files []File
+	// Two members that normalise to one destination are a collision whether or not there is
+	// a target directory. On disk O_EXCL caught it as a bare EEXIST; with no target it was
+	// not caught at all, and Open returned two Files at the same Path for the caller to
+	// resolve however it happened to iterate.
+	seen := make(map[string]struct{})
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -83,6 +88,10 @@ func extractPayload(payload []byte, targetDir string) ([]File, error) {
 		if err != nil {
 			return nil, err
 		}
+		if _, dup := seen[cleanName]; dup {
+			return nil, fmt.Errorf("%w: %q", ErrDuplicatePath, cleanName)
+		}
+		seen[cleanName] = struct{}{}
 
 		// LimitReader caps what a lying header can actually deliver; the +1 byte is how an
 		// over-long entry is detected rather than silently truncated.
