@@ -2,6 +2,7 @@ package capsule_test
 
 import (
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,36 @@ func TestOpenRejectsWrongKey(t *testing.T) {
 				t.Fatal("a capsule opened with the wrong key")
 			}
 		})
+	}
+}
+
+// The README tells a caller to errors.Is a failed Open against ErrCorruptCapsule to tell a
+// malformed container from a bad key. A wrong key fails at AES-GCM's tag check, which
+// wraps its own error, not ErrCorruptCapsule — pin that half of the distinction here, since
+// it is exactly the kind of thing a refactor reverses silently.
+func TestOpenRejectsWrongKeyWithoutErrCorruptCapsule(t *testing.T) {
+	for _, p := range fixturePaths(t) {
+		t.Run(filepath.Base(p), func(t *testing.T) {
+			raw, key := loadFixture(t, p)
+			key[0] ^= 0xFF
+
+			_, _, err := capsule.Open(raw, key, "")
+			if err == nil {
+				t.Fatal("a capsule opened with the wrong key")
+			}
+			if errors.Is(err, capsule.ErrCorruptCapsule) {
+				t.Fatalf("a wrong key was reported as ErrCorruptCapsule: %v", err)
+			}
+		})
+	}
+}
+
+// The other half: a malformed container — here, a manifest field that is not the object
+// Open expects — does wrap ErrCorruptCapsule. It never reaches AES-GCM at all.
+func TestOpenReportsAnUnreadableManifestAsErrCorruptCapsule(t *testing.T) {
+	raw := []byte(`{"format":"kycap/2","manifest":"not an object","ciphertext":"AAAA"}`)
+	if _, _, err := capsule.Open(raw, make([]byte, 32), ""); !errors.Is(err, capsule.ErrCorruptCapsule) {
+		t.Fatalf("got %v, want ErrCorruptCapsule for an unreadable manifest", err)
 	}
 }
 

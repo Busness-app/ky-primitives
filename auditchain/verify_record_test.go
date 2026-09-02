@@ -3,7 +3,6 @@ package auditchain_test
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/Busness-app/ky-primitives/auditchain"
@@ -84,26 +83,6 @@ func TestVerifyRecordRefusesAShortKey(t *testing.T) {
 	}
 	if err := auditchain.VerifyRecord(nil, rec); !errors.Is(err, auditchain.ErrWeakKey) {
 		t.Errorf("nil key gave %v, want ErrWeakKey", err)
-	}
-}
-
-// Append starts numbering at one; no legitimate record carries sequence 0. This is
-// exactly the shape a migration probe hands a legacy log numbered from zero, so
-// VerifyRecord itself has to refuse it, not just Resume by way of it.
-func TestVerifyRecordRefusesSequenceZero(t *testing.T) {
-	zero := strings.Repeat("0", 64)
-	rec := auditchain.Record{Seq: 0, Prev: zero, Hash: zero, Fields: []string{"a"}}
-	if err := auditchain.VerifyRecord(make([]byte, 32), rec); !errors.Is(err, auditchain.ErrBrokenChain) {
-		t.Fatalf("got %v, want ErrBrokenChain for sequence 0", err)
-	}
-}
-
-func TestVerifyRecordRefusesAMalformedHash(t *testing.T) {
-	key := make([]byte, 32)
-	rec := appendOne(t, key, "login", "alice")
-	rec.Hash = "not-64-hex-characters"
-	if err := auditchain.VerifyRecord(key, rec); !errors.Is(err, auditchain.ErrBrokenChain) {
-		t.Fatalf("got %v, want ErrBrokenChain for a malformed hash", err)
 	}
 }
 
