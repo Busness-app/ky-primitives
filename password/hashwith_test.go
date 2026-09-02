@@ -67,8 +67,12 @@ func TestHashWithDefaultParamsMatchesHash(t *testing.T) {
 // Production code in this repository mints at the suite parameters, through Hash.
 func TestHashWithIsNotCalledOutsideTests(t *testing.T) {
 	root := ".."
+	self, err := filepath.Abs("password.go")
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
 	visited := 0
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -76,11 +80,17 @@ func TestHashWithIsNotCalledOutsideTests(t *testing.T) {
 			return nil
 		}
 		visited++
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return err
+		}
 		src, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		if strings.Contains(string(src), "HashWith(") && !strings.HasSuffix(path, "password.go") {
+		// Compare resolved paths, not a suffix: a same-named password.go in any other
+		// package must not get a free pass.
+		if strings.Contains(string(src), "HashWith(") && abs != self {
 			t.Errorf("%s calls HashWith; production code mints through Hash", path)
 		}
 		return nil

@@ -244,21 +244,39 @@ func Hash(plaintext string) (string, error) {
 
 const dummyPlaintext = "dummy verification plaintext"
 
-// dummyHash is minted once, on first use, at whatever the current parameters are — so
+// dummyHashMu guards dummyHashValue, a mutex-guarded memo rather than sync.OnceValue: a
+// OnceValue that panics caches the panic and re-raises it on every later call forever. A
+// mint failure here must not outlive the call that hit it, so on error the value is left
+// unset and the next call tries again.
+var (
+	dummyHashMu    sync.Mutex
+	dummyHashValue string
+)
+
+// dummyHash mints the dummy hash once, on first use, at the current parameters — so
 // DummyVerify costs what a real verification costs even after those parameters move.
 //
-// Lazily rather than at package init: Hash acquires a slot from this package's limiter, and
-// a package-level var that calls it would run that acquire during package initialisation,
-// whose ordering against the limiter's own initialisation Go does not guarantee.
-var dummyHash = sync.OnceValue(func() string {
-	h, err := Hash(dummyPlaintext)
+// Minted through dummyMint, which bypasses withBudget: this derivation runs once per
+// process, not once per request, so it is not the concurrent load admission control exists
+// to bound. Going through the budget meant a single transient ErrBusy on the first-ever
+// call would be cached forever by sync.OnceValue, bricking DummyVerify — with no benefit,
+// since one extra process-lifetime derivation was never what the budget needed to cap.
+func dummyHash() string {
+	dummyHashMu.Lock()
+	defer dummyHashMu.Unlock()
+	if dummyHashValue != "" {
+		return dummyHashValue
+	}
+	h, err := dummyMint()
 	if err != nil {
-		// Only reachable if Hash cannot mint at its own defaults, which means the package
-		// is misconfigured rather than the caller.
+		// Unreachable except a broken RNG: dummyMint takes no budget path, so ErrBusy
+		// cannot reach here. Not cached — dummyHashValue stays unset, so the next call
+		// retries rather than re-raising this forever.
 		panic("password: cannot mint the dummy hash: " + err.Error())
 	}
-	return h
-})
+	dummyHashValue = h
+	return dummyHashValue
+}
 
 // DummyVerify spends the cost of a verification and reports nothing.
 //
@@ -268,7 +286,9 @@ var dummyHash = sync.OnceValue(func() string {
 //
 // It is not perfect and should not be sold as such: Verify can return ErrBusy without
 // deriving anything, and that path is fast. Under load the oracle reopens. Shedding is
-// still the right answer to overload — just do not describe this as constant time.
+// still the right answer to overload — just do not describe this as constant time. The
+// first call in a process additionally mints the dummy hash, so it costs roughly two
+// derivations rather than one; every call after that costs one.
 func DummyVerify() {
 	_, _ = Verify(dummyPlaintext, dummyHash())
 }
@@ -281,9 +301,6 @@ func DummyVerify() {
 // band Verify accepts, so this cannot mint a hash that verifies nowhere — but it can mint
 // a weaker one than the suite standard, and that is the caller's responsibility.
 func HashWith(plaintext string, p Params) (string, error) {
-	if err := p.Validate(); err != nil {
-		return "", err
-	}
 	return hashWith(plaintext, p)
 }
 
@@ -304,9 +321,26 @@ func hashWith(plaintext string, p Params) (string, error) {
 	}); err != nil {
 		return "", err
 	}
+	return encode(p, salt, key), nil
+}
+
+// dummyMint derives the dummy hash at the current default parameters without acquiring the
+// budget. See dummyHash for why: this runs once per process, not once per request.
+func dummyMint() (string, error) {
+	p := DefaultParams()
+	salt := make([]byte, saltBytes)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("password: %w", err)
+	}
+	key := argon2.IDKey([]byte(dummyPlaintext), salt, p.Time, p.Memory, p.Threads, keyBytes)
+	return encode(p, salt, key), nil
+}
+
+// encode renders the PHC string for a derived key at p.
+func encode(p Params, salt, key []byte) string {
 	return "$argon2id$" + versionSegment + "$" + p.segment() + "$" +
 		base64.RawStdEncoding.EncodeToString(salt) + "$" +
-		base64.RawStdEncoding.EncodeToString(key), nil
+		base64.RawStdEncoding.EncodeToString(key)
 }
 
 // Verify reports whether plaintext produced encoded. A malformed or out-of-bounds stored
@@ -327,6 +361,13 @@ func Verify(plaintext, encoded string) (bool, error) {
 
 // NeedsRehash reports whether a stored hash was made below the current parameters, so a
 // deployment can upgrade it on the next successful login.
+//
+// A hash this package did not write — malformed, foreign, or otherwise unparseable — is not
+// stale, it is not ours: this reports false rather than guessing. Verify still refuses a
+// foreign hash outright.
+//
+// The error return is currently always nil. It is kept for signature stability: several
+// migration plans are already written against (bool, error).
 func NeedsRehash(encoded string) (bool, error) {
 	p, _, _, err := parse(encoded)
 	if err != nil {
