@@ -117,6 +117,11 @@ const (
 // other needs. They are exported so a product running derive as well can add the two
 // budgets up rather than assume one of them is the whole story. Memory is in KiB, matching
 // Params.Memory and every other memory value in this package.
+//
+// Both are derived from unexported constants, which keeps them from drifting apart, but
+// also keeps the number out of godoc for anyone reading pkg.go.dev rather than the source.
+// Stated here so it doesn't have to be: MaxMemoryKiB is currently 262144 KiB (256 MiB);
+// MaxLanes is currently 16.
 const (
 	MaxMemoryKiB = budgetKiB
 	MaxLanes     = budgetLanes
