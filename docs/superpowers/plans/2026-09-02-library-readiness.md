@@ -1277,7 +1277,7 @@ Add to `password/password.go`:
 // deriving anything, and that path is fast. Under load the oracle reopens. Shedding is
 // still the right answer to overload — just do not describe this as constant time.
 func DummyVerify() {
-	_, _ = Verify(dummyPlaintext, dummyHash())
+	_, _ = Verify(dummyPlaintext, dummy())
 }
 ```
 
@@ -1289,22 +1289,37 @@ const dummyPlaintext = "dummy verification plaintext"
 // dummyHash is minted once, on first use, at whatever the current parameters are — so
 // DummyVerify costs what a real verification costs even after those parameters move.
 //
-// Lazily rather than at package init: Hash acquires a slot from this package's limiter, and
-// a package-level var that calls it would run that acquire during package initialisation,
-// whose ordering against the limiter's own initialisation Go does not guarantee.
-var dummyHash = sync.OnceValue(func() string {
-	h, err := Hash(dummyPlaintext)
-	if err != nil {
-		// Only reachable if Hash cannot mint at its own defaults, which means the package
-		// is misconfigured rather than the caller.
-		panic("password: cannot mint the dummy hash: " + err.Error())
+// Minted through the path that does NOT acquire the derivation budget. Hash does acquire
+// it, and can return ErrBusy after the queue wait — which is exactly when DummyVerify
+// matters, under the burst or the credential-stuffing run. And an error here must never be
+// cached: sync.OnceValue memoises a panic and re-raises the same value forever, so one
+// transient ErrBusy would brick DummyVerify for the process lifetime. Missing-account
+// logins would then 500 while wrong-password logins 401 — a louder oracle than the timing
+// difference this closes. One derivation once per process is not what admission control
+// exists to bound.
+var (
+	dummyMu   sync.Mutex
+	dummyHash string
+)
+
+func dummy() string {
+	dummyMu.Lock()
+	defer dummyMu.Unlock()
+	if dummyHash == "" {
+		h, err := hashWith(dummyPlaintext, DefaultParams())
+		if err != nil {
+			// Leave it unset so the next call retries. A cached failure is the bug above.
+			return ""
+		}
+		dummyHash = h
 	}
-	return h
-})
+	return dummyHash
+}
 ```
 
-and change `DummyVerify`'s body to `_, _ = Verify(dummyPlaintext, dummyHash())`. Add `sync`
-to the imports.
+and change `DummyVerify`'s body to `_, _ = Verify(dummyPlaintext, dummy())`. Add `sync` to
+the imports. Confirm by reading it that `hashWith` really is the non-acquiring path before
+using it here.
 
 Then change `NeedsRehash`'s parse-failure branch to return `(false, nil)` rather than the
 error, with this comment above it:
