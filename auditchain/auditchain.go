@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"iter"
 	"sync"
 )
 
@@ -115,14 +116,35 @@ func (c *Chain) Anchor() Anchor {
 // anchor. records must be the whole log: this package does not carry a rotation scheme,
 // and accepting a partial one would defeat the anchor.
 func Verify(key []byte, records []Record, anchor Anchor) error {
+	return VerifyStream(key, func(yield func(Record, error) bool) {
+		for _, rec := range records {
+			if !yield(rec, nil) {
+				return
+			}
+		}
+	}, anchor)
+}
+
+// VerifyStream is Verify over an iterator, for a log too large to materialise.
+//
+// Audit chains reach six figures in this suite, and the shape of the bug that follows
+// from paging them is specific: kyrecovery-server's VerifyChain read a fixed 100000
+// events and then reported a sequence gap on a perfectly healthy chain. Streaming removes
+// the reason to page. A record yielded with a non-nil error fails the verification rather
+// than ending the walk, so a store that dies mid-read cannot look like a short chain.
+func VerifyStream(key []byte, records iter.Seq2[Record, error], anchor Anchor) error {
 	if len(key) < minKeyBytes {
 		return fmt.Errorf("%w, got %d", ErrWeakKey, len(key))
 	}
 	prev := genesis
-	for i, rec := range records {
-		want := uint64(i + 1)
-		if rec.Seq != want {
-			return fmt.Errorf("%w: record %d carries sequence %d", ErrBrokenChain, want, rec.Seq)
+	var count uint64
+	for rec, err := range records {
+		if err != nil {
+			return fmt.Errorf("auditchain: reading record %d: %w", count+1, err)
+		}
+		count++
+		if rec.Seq != count {
+			return fmt.Errorf("%w: record %d carries sequence %d", ErrBrokenChain, count, rec.Seq)
 		}
 		if rec.Prev != prev {
 			return fmt.Errorf("%w: record %d does not follow its predecessor", ErrBrokenChain, rec.Seq)
@@ -133,7 +155,6 @@ func Verify(key []byte, records []Record, anchor Anchor) error {
 		prev = rec.Hash
 	}
 
-	count := uint64(len(records))
 	switch {
 	case count < anchor.Count:
 		return fmt.Errorf("%w: %d records, anchor counted %d", ErrTruncated, count, anchor.Count)

@@ -146,7 +146,23 @@ correctly, so the anchor is a parameter rather than an option.
 chain, err := auditchain.New(key)          // or Resume(key, lastRecord)
 rec, err := chain.Append("login", user)    // persist rec, and chain.Anchor() beside it
 err = auditchain.Verify(key, records, anchor)
+err = auditchain.VerifyStream(key, rows, anchor) // same, for a log too large to hold
 ```
+
+Chains in this suite reach six figures, and the bug that follows from paging them is
+specific: `kyrecovery-server`'s `VerifyChain` read a fixed 100000 events and then reported a
+sequence gap on a perfectly healthy chain. `VerifyStream` removes the reason to page. A
+record yielded with a non-nil error fails the verification rather than ending the walk, so a
+store that dies mid-read cannot look like a short chain.
+
+`Anchor` is `{Count, Hash}`, which matches `kyrecovery-server`'s `ledger.head` but **not**
+`kypassword-server`'s `audit.state`. That carries a third field — the first index required
+to be keyed — because KyPassword has a two-version chain: v0 records predating the key,
+verified under unkeyed SHA-256, and v1 under HMAC. Without that field an attacker downgrades
+a keyed entry to v0 and recomputes its hash with the public algorithm. This package has no
+version concept and cannot express it, so **KyPassword cannot migrate onto `auditchain`
+without either abandoning its v0 records or adding versioning here.** That is an open
+decision, not an oversight.
 
 `Fields` are opaque and storage is not this package's business. The three implementations
 logged different things and wrote to JSON lines, a file and a database; forcing one schema
