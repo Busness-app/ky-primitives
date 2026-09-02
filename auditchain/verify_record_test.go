@@ -134,6 +134,10 @@ func TestReplayOfNothingIsTheGenesisAnchor(t *testing.T) {
 	if anchor.Count != 0 {
 		t.Errorf("anchor.Count = %d, want 0", anchor.Count)
 	}
+	const genesisHash = "0000000000000000000000000000000000000000000000000000000000000000"
+	if anchor.Hash != genesisHash {
+		t.Errorf("anchor.Hash = %q, want the genesis hash %q", anchor.Hash, genesisHash)
+	}
 }
 
 func TestReplayRefusesAShortKey(t *testing.T) {

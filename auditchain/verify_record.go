@@ -8,6 +8,11 @@ import (
 
 // VerifyRecord reports whether a record carries its own digest under this key.
 //
+// It also refuses a record whose Seq is 0, or whose Hash or Prev is not 64 lowercase hex
+// characters: neither shape was ever minted by Append, so there is nothing authentic to
+// compare against. A legacy log numbered from zero will fail here with that sequence-0
+// error, not a digest mismatch — expect it when converting one.
+//
 // It says nothing about where the record sits. Resume answers a different question — is
 // this the tail — and answering it requires the anchor, because every record in a healthy
 // chain carries a valid digest. Callers converting a log from an older format want this

@@ -117,7 +117,7 @@ func Resume(key []byte, last Record, anchor Anchor) (*Chain, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := VerifyRecord(key, last); err != nil {
+	if err := VerifyRecord(c.key, last); err != nil {
 		return nil, err
 	}
 	// Append mints count+1, so the top of the range wraps the next record to zero — which
