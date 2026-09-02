@@ -17,8 +17,8 @@ func TestShareStringIsVersionedAndSelfDescribing(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, s := range shares {
-		if !strings.HasPrefix(s.String(), Version+"-") {
-			t.Fatalf("share %q does not begin with the version tag %q", s, Version)
+		if !strings.HasPrefix(s.String(), VersionV2+"-") {
+			t.Fatalf("share %q does not begin with the version tag %q", s, VersionV2)
 		}
 		if s.Threshold != 3 {
 			t.Fatalf("share carries threshold %d, want 3", s.Threshold)
@@ -27,7 +27,7 @@ func TestShareStringIsVersionedAndSelfDescribing(t *testing.T) {
 			t.Fatal("shares of one secret carry different set identifiers")
 		}
 	}
-	if shares[0].SetID == 0 {
+	if shares[0].SetID == ([16]byte{}) {
 		t.Fatal("set identifier is zero, so two secrets would look like one set")
 	}
 }
