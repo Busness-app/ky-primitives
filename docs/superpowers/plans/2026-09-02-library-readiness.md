@@ -1342,8 +1342,11 @@ Expected: PASS. Then confirm the minting happens once rather than per call:
 
 Run: `go test ./password/ -run TestDummyVerifyDoesNotPanic -count=20 -v`
 Expected: PASS, and the whole run takes roughly one derivation's time plus twenty
-verifications — not twenty mintings. If it scales with `-count`, `sync.OnceValue` is not
-wrapping what you think it is.
+verifications — not twenty mintings. If it scales with `-count`, the memo is not holding.
+
+Then prove the failure mode I got wrong is actually gone: write a throwaway probe that
+holds the whole derivation budget and calls `DummyVerify` twice. The first call must not
+poison the second. Paste its output, then delete the probe.
 
 - [ ] **Step 6: Commit**
 
