@@ -1,6 +1,7 @@
 package auditchain
 
 import (
+	"context"
 	"crypto/hmac"
 	"fmt"
 )
@@ -27,4 +28,31 @@ func VerifyRecord(key []byte, r Record) error {
 		return fmt.Errorf("%w: record %d does not carry its own digest", ErrBrokenChain, r.Seq)
 	}
 	return nil
+}
+
+// Replay builds a whole chain in memory from field tuples and returns its records with the
+// anchor they end at. It writes nothing.
+//
+// Append takes a persist function because the chain's head is a claim about what is on
+// disk, and advancing it before the store agrees leaves the next record chained onto one
+// that never existed. A bulk conversion inverts that: it rebuilds every record, writes the
+// log once atomically, and saves one anchor. Passing a persist that does nothing per record
+// would satisfy the signature and mean nothing — do not copy that pattern outside this
+// function. This is the shape that fits: the caller still owes one transaction over the
+// returned records and anchor together.
+func Replay(key []byte, tuples [][]string) ([]Record, Anchor, error) {
+	c, err := New(key)
+	if err != nil {
+		return nil, Anchor{}, err
+	}
+	records := make([]Record, 0, len(tuples))
+	noop := func(Record, Anchor) error { return nil }
+	for _, fields := range tuples {
+		rec, err := c.Append(context.Background(), noop, fields...)
+		if err != nil {
+			return nil, Anchor{}, err
+		}
+		records = append(records, rec)
+	}
+	return records, c.Anchor(), nil
 }

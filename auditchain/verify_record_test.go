@@ -85,3 +85,59 @@ func TestVerifyRecordRefusesAShortKey(t *testing.T) {
 		t.Errorf("nil key gave %v, want ErrWeakKey", err)
 	}
 }
+
+func TestReplayBuildsAChainVerifyAccepts(t *testing.T) {
+	key := make([]byte, 32)
+	tuples := [][]string{
+		{"login", "alice"},
+		{"logout", "alice"},
+		{"login", "bob"},
+	}
+	records, anchor, err := auditchain.Replay(key, tuples)
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if len(records) != 3 {
+		t.Fatalf("Replay returned %d records, want 3", len(records))
+	}
+	if anchor.Count != 3 {
+		t.Errorf("anchor.Count = %d, want 3", anchor.Count)
+	}
+	if anchor.Hash != records[2].Hash {
+		t.Errorf("anchor.Hash = %q, want the last record's %q", anchor.Hash, records[2].Hash)
+	}
+	if err := auditchain.Verify(key, records, anchor); err != nil {
+		t.Fatalf("Verify on a replayed chain: %v", err)
+	}
+}
+
+func TestReplayNumbersFromOne(t *testing.T) {
+	key := make([]byte, 32)
+	records, _, err := auditchain.Replay(key, [][]string{{"a"}, {"b"}})
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if records[0].Seq != 1 || records[1].Seq != 2 {
+		t.Errorf("Seq = %d, %d; want 1, 2", records[0].Seq, records[1].Seq)
+	}
+}
+
+func TestReplayOfNothingIsTheGenesisAnchor(t *testing.T) {
+	key := make([]byte, 32)
+	records, anchor, err := auditchain.Replay(key, nil)
+	if err != nil {
+		t.Fatalf("Replay: %v", err)
+	}
+	if len(records) != 0 {
+		t.Errorf("got %d records, want 0", len(records))
+	}
+	if anchor.Count != 0 {
+		t.Errorf("anchor.Count = %d, want 0", anchor.Count)
+	}
+}
+
+func TestReplayRefusesAShortKey(t *testing.T) {
+	if _, _, err := auditchain.Replay(make([]byte, 31), [][]string{{"a"}}); err == nil {
+		t.Fatal("Replay accepted a 31-byte key")
+	}
+}
