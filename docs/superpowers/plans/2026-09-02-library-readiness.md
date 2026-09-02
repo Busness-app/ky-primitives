@@ -1741,7 +1741,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Produces:
   - `func AuthSecretContext(ctx context.Context, password, saltBase64 string, iterations int, label string) (string, error)`
   - `AuthSecret` delegates with `context.Background()`
-  - `const MaxConcurrent = 4`, and in `password`, `MaxMemoryBytes` and `MaxLanes`
+  - `const MaxConcurrent = 4`, and in `password`, `MaxMemoryKiB` and `MaxLanes`
 
 kypost checks `ctx.Err()` before queueing so a client that has already gone does not take a
 slot ahead of one that is still waiting. `derive`'s acquire is a bare two-second timer with
@@ -1831,7 +1831,7 @@ constant, not shadowing it) with:
 // This budget is separate from password's, and deliberately: this package is
 // standard-library-only, and importing password would pull x/crypto into it. The two also
 // bound different resources — slots of CPU here, bytes and lanes of memory there. A product
-// adopting both is spending MaxConcurrent cores plus password.MaxMemoryBytes; add them up
+// adopting both is spending MaxConcurrent cores plus password.MaxMemoryKiB; add them up
 // against the box before deciding either is safe.
 const MaxConcurrent = 4
 ```
@@ -1863,12 +1863,12 @@ Add `"context"` to the imports.
 In `password/password.go`, alongside the existing bounds:
 
 ```go
-// MaxMemoryBytes and MaxLanes are the two dimensions of this package's derivation budget,
+// MaxMemoryKiB and MaxLanes are the two dimensions of this package's derivation budget,
 // taken together under one acquirer so two waiters can never each hold part of what the
 // other needs. They are exported so a product running derive as well can add the two
 // budgets up rather than assume one of them is the whole story.
 const (
-	MaxMemoryBytes = 256 << 20
+	MaxMemoryKiB = budgetKiB // 262144 KiB = 256 MiB
 	MaxLanes       = 16
 )
 ```
@@ -2014,7 +2014,7 @@ Under `## derive`:
 ```markdown
 `AuthSecretContext` bounds the wait for a slot. The budget stays separate from
 `password`'s — the two bound different resources, and this package importing `password`
-would pull `x/crypto` into it — but `derive.MaxConcurrent`, `password.MaxMemoryBytes` and
+would pull `x/crypto` into it — but `derive.MaxConcurrent`, `password.MaxMemoryKiB` and
 `password.MaxLanes` are exported so a product running both can add them up.
 ```
 
