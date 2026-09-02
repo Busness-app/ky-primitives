@@ -127,7 +127,8 @@ func TestVerifyRejectsAnAppendedForgery(t *testing.T) {
 
 func TestResumeContinuesAnExistingChain(t *testing.T) {
 	first := build(t, []string{"a"}, []string{"b"})
-	c, err := Resume(key, first[len(first)-1])
+	last := first[len(first)-1]
+	c, err := Resume(key, last, Anchor{Count: last.Seq, Hash: last.Hash})
 	if err != nil {
 		t.Fatal(err)
 	}

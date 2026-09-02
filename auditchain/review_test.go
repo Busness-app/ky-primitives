@@ -40,7 +40,8 @@ func TestVerifyRejectsMalformedHashes(t *testing.T) {
 }
 
 func TestResumeRejectsAMalformedHash(t *testing.T) {
-	if _, err := Resume(key, Record{Seq: 1, Prev: genesis, Hash: "nothex", Fields: []string{"a"}}); !errors.Is(err, ErrBrokenChain) {
+	bad := Record{Seq: 1, Prev: genesis, Hash: "nothex", Fields: []string{"a"}}
+	if _, err := Resume(key, bad, Anchor{Count: 1, Hash: bad.Hash}); !errors.Is(err, ErrBrokenChain) {
 		t.Fatalf("got %v, want ErrBrokenChain", err)
 	}
 }
