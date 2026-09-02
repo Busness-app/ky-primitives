@@ -240,56 +240,15 @@ func TestReadUnverifiedManifestNeedsNoKey(t *testing.T) {
 	}
 }
 
-// The manifest read without a key is unauthenticated: anyone who can reach the file can
-// rewrite it. This test is the reason the two types are distinct — it demonstrates the
-// rewrite, so the type boundary is not merely decorative.
-func TestUnverifiedManifestIsRewritableWithoutTheKey(t *testing.T) {
-	files := []capsule.File{{Path: "db.sqlite", Content: []byte("payload"), Mode: 0o600}}
-	raw, key, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 3, 5)
-	if err != nil {
-		t.Fatalf("Seal: %v", err)
-	}
-
-	var doc map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatalf("unmarshal container: %v", err)
-	}
-	var m map[string]any
-	if err := json.Unmarshal(doc["manifest"], &m); err != nil {
-		t.Fatalf("unmarshal manifest: %v", err)
-	}
-	m["threshold"] = 1
-	m["total_shares"] = 1
-	tampered, err := json.Marshal(m)
-	if err != nil {
-		t.Fatalf("remarshal: %v", err)
-	}
-	doc["manifest"] = tampered
-	forged, err := json.Marshal(doc)
-	if err != nil {
-		t.Fatalf("remarshal container: %v", err)
-	}
-
-	// The unverified read believes the forgery. That is its nature.
-	got, err := capsule.ReadUnverifiedManifest(forged)
-	if err != nil {
-		t.Fatalf("ReadUnverifiedManifest: %v", err)
-	}
-	if got.Threshold != 1 {
-		t.Fatalf("Threshold = %d, want the forged 1", got.Threshold)
-	}
-
-	// Open does not. This is the line that makes the type split worth having.
-	if _, _, err := capsule.Open(forged, key, ""); err == nil {
-		t.Fatal("Open accepted a rewritten manifest")
-	}
-}
 ```
+
+The companion test — that `Open` refuses a manifest rewritten this way — lives in Task 3,
+because refusing it is Task 3's deliverable and this task must not commit a failing test.
 
 - [ ] **Step 2: Run it and watch it fail**
 
-Run: `go test ./capsule/ -run 'TestReadUnverifiedManifest|TestUnverifiedManifestIsRewritable' -v`
-Expected: FAIL — `undefined: capsule.ReadUnverifiedManifest`, and `capsule.Open` returning two values not three.
+Run: `go test ./capsule/ -run TestReadUnverifiedManifest -v`
+Expected: FAIL — `undefined: capsule.ReadUnverifiedManifest`
 
 - [ ] **Step 3: Write `capsule/manifest.go`**
 
@@ -368,8 +327,8 @@ field names or the two drift, and drift here fails every capsule rather than any
 
 - [ ] **Step 5: Run the tests**
 
-Run: `go test ./capsule/ -run 'TestReadUnverifiedManifest' -v`
-Expected: PASS. `TestUnverifiedManifestIsRewritable` still fails on `Open`'s arity — Task 3 fixes that.
+Run: `go test -count=1 ./capsule/ -v`
+Expected: PASS, with no failing or skipped tests.
 
 - [ ] **Step 6: Commit**
 
@@ -403,7 +362,58 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 **This task is where the downstream job earns its place.** Changing `Open`'s signature breaks gridlock, which is the only consumer in the job's list. Open a `feat/capsule-manifest` branch in gridlock too, and the job pairs them. If the job goes red and stays red, Task 1 is not finished.
 
-- [ ] **Step 1: Run the Task 2 test that still fails**
+- [ ] **Step 1: Write the failing test**
+
+Append to `capsule/manifest_test.go`:
+
+```go
+// The manifest read without a key is unauthenticated: anyone who can reach the file can
+// rewrite it. This test is the reason the two types are distinct — it demonstrates the
+// rewrite, so the type boundary is not merely decorative.
+func TestUnverifiedManifestIsRewritableWithoutTheKey(t *testing.T) {
+	files := []capsule.File{{Path: "db.sqlite", Content: []byte("payload"), Mode: 0o600}}
+	raw, key, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 3, 5)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("unmarshal container: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(doc["manifest"], &m); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+	m["threshold"] = 1
+	m["total_shares"] = 1
+	tampered, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("remarshal: %v", err)
+	}
+	doc["manifest"] = tampered
+	forged, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("remarshal container: %v", err)
+	}
+
+	// The unverified read believes the forgery. That is its nature.
+	got, err := capsule.ReadUnverifiedManifest(forged)
+	if err != nil {
+		t.Fatalf("ReadUnverifiedManifest: %v", err)
+	}
+	if got.Threshold != 1 {
+		t.Fatalf("Threshold = %d, want the forged 1", got.Threshold)
+	}
+
+	// Open does not. This is the line that makes the type split worth having.
+	if _, _, err := capsule.Open(forged, key, ""); err == nil {
+		t.Fatal("Open accepted a rewritten manifest")
+	}
+}
+```
+
+- [ ] **Step 1b: Run it and watch it fail**
 
 Run: `go test ./capsule/ -run TestUnverifiedManifestIsRewritable -v`
 Expected: FAIL — `assignment mismatch: 3 variables but capsule.Open returns 2 values`
@@ -488,7 +498,7 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ## Task 4: capsule — per-file size and digest
 
 **Files:**
-- Modify: `capsule/capsule.go:39-43` (`File`), `capsule/manifest.go` (add `FileEntry`, `Files`)
+- Modify: `capsule/manifest.go` (add `FileEntry`, `Dependency`, `Files`)
 - Modify: `capsule/seal.go` (populate the entries)
 - Test: `capsule/manifest_test.go`
 
@@ -499,7 +509,11 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
   - `UnverifiedManifest.Files []FileEntry`
 
 kyrecovery verifies each restored file against a per-file SHA-256 (`capsule.go:287-297`).
-`File{Path, Content, Mode}` cannot express that, so the check has nowhere to go. The
+`File{Path, Content, Mode}` cannot express that, so the check has nowhere to go.
+
+`File` itself is **not** changed: its content length gives the size and the digest is
+computed at seal time, so putting either on the input value would create a second source of
+truth for both. The manifest records them. The
 payload hash covers the archive as a whole; it cannot say *which* file is wrong.
 
 - [ ] **Step 1: Write the failing test**
@@ -1254,28 +1268,34 @@ Add to `password/password.go`:
 // deriving anything, and that path is fast. Under load the oracle reopens. Shedding is
 // still the right answer to overload — just do not describe this as constant time.
 func DummyVerify() {
-	_, _ = Verify(dummyPlaintext, dummyHash)
+	_, _ = Verify(dummyPlaintext, dummyHash())
 }
 ```
 
 and, at package scope:
 
 ```go
-// dummyHash is minted once at init, at the current parameters, so DummyVerify costs what a
-// real verification costs even after the parameters move.
-var (
-	dummyPlaintext = "dummy verification plaintext"
-	dummyHash      = mustHash(dummyPlaintext)
-)
+const dummyPlaintext = "dummy verification plaintext"
 
-func mustHash(s string) string {
-	h, err := Hash(s)
+// dummyHash is minted once, on first use, at whatever the current parameters are — so
+// DummyVerify costs what a real verification costs even after those parameters move.
+//
+// Lazily rather than at package init: Hash acquires a slot from this package's limiter, and
+// a package-level var that calls it would run that acquire during package initialisation,
+// whose ordering against the limiter's own initialisation Go does not guarantee.
+var dummyHash = sync.OnceValue(func() string {
+	h, err := Hash(dummyPlaintext)
 	if err != nil {
+		// Only reachable if Hash cannot mint at its own defaults, which means the package
+		// is misconfigured rather than the caller.
 		panic("password: cannot mint the dummy hash: " + err.Error())
 	}
 	return h
-}
+})
 ```
+
+and change `DummyVerify`'s body to `_, _ = Verify(dummyPlaintext, dummyHash())`. Add `sync`
+to the imports.
 
 Then change `NeedsRehash`'s parse-failure branch to return `(false, nil)` rather than the
 error, with this comment above it:
@@ -1294,8 +1314,12 @@ Expected: PASS.
 - [ ] **Step 5: Check the init cost is paid once**
 
 Run: `go test ./password/ -run TestDummyVerifyDoesNotPanic -v -count=1`
-Expected: PASS in well under a second. If it takes several seconds, `mustHash` is being
-called per invocation rather than once at init — fix that before moving on.
+Expected: PASS. Then confirm the minting happens once rather than per call:
+
+Run: `go test ./password/ -run TestDummyVerifyDoesNotPanic -count=20 -v`
+Expected: PASS, and the whole run takes roughly one derivation's time plus twenty
+verifications — not twenty mintings. If it scales with `-count`, `sync.OnceValue` is not
+wrapping what you think it is.
 
 - [ ] **Step 6: Commit**
 
@@ -1941,7 +1965,10 @@ added above has no test behind it, either write the test or delete the sentence.
 
 - [ ] **Step 4: Confirm the downstream job is green**
 
-Run: `cd /tmp && rm -rf tagprobe && mkdir tagprobe && cd tagprobe && git clone --depth 1 /home/yoshi/busness.app/gridlock-server && cd gridlock-server && go mod edit -replace github.com/Busness-app/ky-primitives=/home/yoshi/busness.app/ky-primitives && go build ./... && go test -count=1 ./...`
+Clone gridlock's **paired branch**, not its default — the default branch has not taken
+Task 3's `Open` change, so checking it would either fail spuriously or pass vacuously.
+
+Run: `cd /tmp && rm -rf tagprobe && mkdir tagprobe && cd tagprobe && git clone --depth 1 -b feat/capsule-manifest /home/yoshi/busness.app/gridlock-server && cd gridlock-server && go mod edit -replace github.com/Busness-app/ky-primitives=/home/yoshi/busness.app/ky-primitives && go build ./... && go test -count=1 ./...`
 Expected: PASS. Do not tag until it does.
 
 - [ ] **Step 5: Commit and tag**
