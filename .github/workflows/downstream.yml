@@ -18,6 +18,7 @@ jobs:
       matrix:
         consumer:
           - gridlock-server
+          - kybookmarks-server
     runs-on: ubuntu-latest
     steps:
       - name: Check out ky-primitives
