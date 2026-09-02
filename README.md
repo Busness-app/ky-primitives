@@ -68,6 +68,9 @@ m, files, err := capsule.Open(raw, key, "")               // decode only, writes
 u, err := capsule.ReadUnverifiedManifest(raw)             // no key; show, do not decide
 ```
 
+`errors.Is` a failed `Open` against `ErrCorruptCapsule` to tell a malformed container from
+a bad key.
+
 The ciphertext field is standard base64 in and out. Decoding used to also accept raw-url,
 for capsules `ky_server_base` and `gridlock-server` encoded that way and never persisted;
 with one writer left, a second accepted spelling is only a second thing that has to stay
@@ -183,7 +186,7 @@ Three implementations existed, with three tuple layouts and three key policies:
 
 | | `kypassword-server` | `kybookmarks-server` | `kyrecovery-server` |
 |---|---|---|---|
-| Key | generated, ≥32 bytes enforced | **falls back to a literal in its own source** | HKDF from the keyring |
+| Key | generated, ≥32 bytes enforced | **a literal survives on the verify/convert path; the write path has no fallback** | HKDF from the keyring |
 | Truncation | anchor beside the key | undetectable | sequence numbers in the DB |
 | Fields | joined on bare `\|` | joined on bare `\|` | details pre-hashed |
 
@@ -192,7 +195,8 @@ Three implementations existed, with three tuple layouts and three key policies:
 `loadOrCreateKey` has no constant fallback. What survives is narrower and still real: the
 literal is what `legacyHash` verifies v0 entries against, so a wholly-forged log on a first
 boot with no state file converts cleanly through `converge` and verifies forever. The key
-floor here is 32 bytes and there is no fallback at all.
+floor here is 32 bytes, and on the write path — the one that mints and checks new records —
+there is no fallback at all.
 
 Every field is length-prefixed. Joining on a delimiter lets a field containing it shift
 into its neighbour and produce another record's digest, forging a record without the key;
@@ -239,6 +243,8 @@ it. A conversion probe wants the first.
 final anchor, for a bulk rewrite that writes the log once. `Append`'s persist parameter
 means the chain advances only when the store agrees; passing one that does nothing per
 record would satisfy the signature and mean the opposite.
+
+Errors worth an `errors.Is` in a caller: `ErrWeakKey`, `ErrBrokenChain`.
 
 Chains in this suite reach six figures, and the bug that follows from paging them is
 specific: `kyrecovery-server`'s `VerifyChain` read a fixed 100000 events and then reported a
@@ -319,17 +325,21 @@ The PHC parser compares against the canonical spelling rather than scanning. `fm
 reads the fields it is asked for and ignores the rest, so `p=4TRAILINGGARBAGE`, `p=04` and
 `v=19GARBAGE` all verified clean.
 
-`HashWith` mints at chosen parameters, bounded to the same band `Verify` accepts, for a
-test suite that cannot afford 64 MiB per derivation. `Hash` is the suite's answer and what
-production code calls. `DummyVerify` spends a verification's cost on a reject path that
-never reached one, so a missing account does not answer faster than a wrong password —
-though `ErrBusy` returns without deriving, so under load that leak reopens.
+`HashWith` mints at chosen `Params` — `{Memory, Time, Threads}`, bounded to the same band
+`Verify` accepts — for a test suite that cannot afford 64 MiB per derivation. `Hash` is the
+suite's answer, calling `HashWith` at `DefaultParams()`, and what production code calls.
+`DummyVerify` spends a verification's cost on a reject path that never reached one, so a
+missing account does not answer faster than a wrong password — though `ErrBusy` returns
+without deriving, so under load that leak reopens.
 
 ```go
 encoded, err := password.Hash(plaintext)        // "$argon2id$v=19$m=65536,t=3,p=4$..."
 ok, err := password.Verify(plaintext, encoded)  // ErrMalformed, never a silent default
 stale, err := password.NeedsRehash(encoded)     // upgrade on next successful login
+fast, err := password.HashWith(plaintext, password.Params{Memory: 8 * 1024, Time: 1, Threads: 1}) // tests only
 ```
+
+Errors worth an `errors.Is` in a caller: `ErrBusy`, `ErrMalformed`.
 
 `Verify` accepts a weaker-but-valid hash so a deployment rehashes on login instead of
 locking everyone out. Pair it with `NeedsRehash`; no Argon2 repo in the suite had either.
@@ -444,6 +454,9 @@ key, ok, err := keyfile.FromEnv("KY_AUDIT_KEY", 32)       // ok is false when un
 
 A hex key file is lowercase hex with exactly one trailing newline — 65 bytes for a 32-byte
 key. That format is pinned by `TestHexFileFormat`.
+
+`errors.Is` a failed load against `ErrUnreadable` to tell a corrupt key file from a missing
+one — the second creates under `LoadOrCreate`, the first never does.
 
 ## derive
 

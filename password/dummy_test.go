@@ -10,6 +10,45 @@ func TestDummyVerifyDoesNotPanic(t *testing.T) {
 	DummyVerify()
 }
 
+// The README's timing claim — a missing account does not answer faster than a wrong
+// password — is a structural property, not something a wall-clock test can safely pin: on
+// a loaded CI box a timing assertion flakes, and a flaky test guarding a security property
+// gets muted, which is worse than no test. So this checks the two facts that make the
+// property true instead of measuring it: the memoised dummy hash is minted at
+// DefaultParams(), the same band Hash uses, and DummyVerify runs it through the real
+// Verify path rather than a shortcut. Same parameters through the same code implies same
+// cost.
+func TestDummyVerifyUsesRealParametersAndVerification(t *testing.T) {
+	dummyHashMu.Lock()
+	dummyHashValue = ""
+	dummyHashMu.Unlock()
+
+	DummyVerify()
+
+	dummyHashMu.Lock()
+	encoded := dummyHashValue
+	dummyHashMu.Unlock()
+	if encoded == "" {
+		t.Fatal("DummyVerify did not mint a dummy hash")
+	}
+
+	p, _, _, err := parse(encoded)
+	if err != nil {
+		t.Fatalf("parse(dummy hash): %v", err)
+	}
+	if p != DefaultParams() {
+		t.Fatalf("dummy hash uses %+v, want DefaultParams() %+v", p, DefaultParams())
+	}
+
+	ok, err := Verify(dummyPlaintext, encoded)
+	if err != nil {
+		t.Fatalf("Verify(dummyPlaintext, dummy hash): %v", err)
+	}
+	if !ok {
+		t.Fatal("the dummy hash does not verify against dummyPlaintext: DummyVerify would not be running a real check")
+	}
+}
+
 func TestNeedsRehashIsFalseForAForeignFormat(t *testing.T) {
 	cases := []string{
 		"scrypt$131072$8$1$c2FsdA$aGFzaA",

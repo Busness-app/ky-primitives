@@ -67,7 +67,7 @@ type Anchor struct {
 // The lock is a channel rather than a sync.Mutex because persist runs while it is held,
 // and a sync.Mutex cannot be waited on with a deadline. A store that hangs therefore owned
 // the chain outright: every later append, and every Anchor(), blocked on it forever with
-// no way to shed. AppendContext lets a waiter give up.
+// no way to shed. Append takes a context.Context so a waiter can give up.
 type Chain struct {
 	lock  chan struct{}
 	key   []byte
