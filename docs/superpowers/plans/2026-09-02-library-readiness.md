@@ -1889,6 +1889,31 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Consumes: every API added in Tasks 2-10.
 - Produces: tag `v0.2.0`. Every product phase after this pins a tag, never a pseudo-version.
 
+- [ ] **Step 0: Remove `capsule.Dependency`, and document what `Manifest` does not promise**
+
+Two carried rulings, both due before the tag freezes the API.
+
+**Delete `Dependency` from `capsule/manifest.go`.** It has no reference anywhere in this
+repo: `Seal` keeps `deps any` and never encodes through it, and no test exercises it. It was
+specified because three kyrecovery signatures need something to decode into — but that
+migration is Phase 5, its plan is unwritten, and the shape it needs will be known then rather
+than guessed now. An exported type with no exerciser is surface that must be maintained and
+cannot be changed freely once a tag exists.
+
+**Add one sentence to `Manifest`'s doc comment** saying what a successful `Open` does and does
+not establish:
+
+```go
+// A Manifest is authenticated, not validated. Open proves the manifest is the one that was
+// sealed under this key; it does not re-apply Seal's topology rule, so a kit recorded as
+// 0-of-0 by some other writer opens without complaint. Check the numbers you intend to act
+// on.
+```
+
+Run: `go build ./... && go test -race -count=1 ./...`
+Expected: PASS. If deleting `Dependency` breaks a build, it was not dead after all — stop and
+say so.
+
 - [ ] **Step 1: Correct the kybookmarks claim**
 
 `README.md` currently says `kybookmarks-server/internal/audit/audit.go:44` substitutes
@@ -1924,11 +1949,14 @@ u, err := capsule.ReadUnverifiedManifest(raw)             // no key; show, do no
 ```
 ```
 
-Under `## auditchain`:
+Under `## auditchain` — the section currently enumerates `New`/`Resume`/`Append`/`Verify`/
+`VerifyStream` and does not mention the two functions added for the consumers, which is the
+whole point of the branch:
 
 ```markdown
 `VerifyRecord` asks whether a record carries its own digest, and nothing about where it
-sits. `Resume` answers a different question — is this the tail — and needs the anchor to do
+sits. It also refuses a record numbered zero or carrying a malformed hash, because `Append`
+mints neither. `Resume` answers a different question — is this the tail — and needs the anchor to do
 it. A conversion probe wants the first.
 
 `Replay` builds a chain in memory from field tuples and hands back the records with their
