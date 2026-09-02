@@ -132,3 +132,43 @@ func TestAHashLargerThanTheWholeBudgetIsRejectedImmediately(t *testing.T) {
 		t.Fatalf("took %v, which means it waited for a slot it could never get", elapsed)
 	}
 }
+
+// The budget holds admit only to negotiate a reservation. Holding it across the derivation
+// capped the package at one derivation at a time however much budget was free, and made
+// the wait-and-retry loop unreachable — a ceiling the peak test cannot see, because a peak
+// under the budget is trivially true when only one derivation ever runs.
+func TestDerivationsRunConcurrentlyWithinTheBudget(t *testing.T) {
+	const n = 4
+	arrived := make(chan struct{}, n)
+	release := make(chan struct{})
+	stop := sync.OnceFunc(func() { close(release) })
+	defer stop()
+
+	errs := make(chan error, n)
+	for range n {
+		go func() {
+			errs <- withMemory(budgetKiB/n, func() {
+				arrived <- struct{}{}
+				<-release
+			})
+		}()
+	}
+
+	for i := range n {
+		select {
+		case <-arrived:
+		case <-time.After(maxWait + 5*time.Second):
+			t.Fatalf("only %d of %d derivations were admitted; the budget serialises them", i, n)
+		}
+	}
+	stop()
+
+	for range n {
+		if err := <-errs; err != nil {
+			t.Fatalf("a derivation inside the budget was refused: %v", err)
+		}
+	}
+	if inFlight() != 0 {
+		t.Fatalf("%d KiB still reserved after every derivation finished", inFlight())
+	}
+}

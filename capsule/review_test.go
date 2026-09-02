@@ -159,3 +159,27 @@ func TestExtractionCannotEscapeThroughASymlinkedParent(t *testing.T) {
 		t.Fatal("a member was written outside the target through a symlink")
 	}
 }
+
+// Seal refuses to write colliding paths, but a capsule from any other writer still reaches
+// extraction. With a target directory the collision surfaced as a bare EEXIST from O_EXCL;
+// with none it did not surface at all, and Open handed back two Files at one Path.
+func TestExtractRejectsPathsThatCollideAfterNormalisation(t *testing.T) {
+	payload := hostilePayload(t,
+		[]*tar.Header{
+			{Name: "a/../b", Mode: 0600, Size: 5, Typeflag: tar.TypeReg},
+			{Name: "b", Mode: 0600, Size: 6, Typeflag: tar.TypeReg},
+		},
+		[][]byte{[]byte("first"), []byte("second")})
+
+	for _, target := range []string{"", filepath.Join(t.TempDir(), "restore")} {
+		name := "no target directory"
+		if target != "" {
+			name = "into a target directory"
+		}
+		t.Run(name, func(t *testing.T) {
+			if _, err := extractPayload(payload, target); !errors.Is(err, ErrDuplicatePath) {
+				t.Fatalf("got %v, want ErrDuplicatePath", err)
+			}
+		})
+	}
+}
