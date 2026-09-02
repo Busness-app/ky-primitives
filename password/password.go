@@ -242,11 +242,25 @@ func Hash(plaintext string) (string, error) {
 	return hashWith(plaintext, DefaultParams())
 }
 
+// HashWith derives a PHC-encoded Argon2id hash at the given parameters.
+//
+// Hash is the suite's answer and what production code should call. This exists for two
+// callers: a test suite that cannot afford 64 MiB per derivation, and a product that must
+// mint at parameters an existing deployment already uses. Parameters are bounded to the
+// band Verify accepts, so this cannot mint a hash that verifies nowhere — but it can mint
+// a weaker one than the suite standard, and that is the caller's responsibility.
+func HashWith(plaintext string, p Params) (string, error) {
+	if err := p.Validate(); err != nil {
+		return "", err
+	}
+	return hashWith(plaintext, p)
+}
+
 func hashWith(plaintext string, p Params) (string, error) {
 	if plaintext == "" {
 		return "", errors.New("password: refusing to hash an empty password")
 	}
-	if err := p.validate(); err != nil {
+	if err := p.Validate(); err != nil {
 		return "", err
 	}
 	salt := make([]byte, saltBytes)
@@ -324,7 +338,7 @@ func parseParams(segment string) (Params, error) {
 	if canonical := p.segment(); canonical != segment {
 		return Params{}, fmt.Errorf("%w: parameter segment %q is not canonical, want %q", ErrMalformed, segment, canonical)
 	}
-	return p, p.validate()
+	return p, p.Validate()
 }
 
 // segment renders the canonical parameter spelling.
@@ -332,7 +346,11 @@ func (p Params) segment() string {
 	return fmt.Sprintf("m=%d,t=%d,p=%d", p.Memory, p.Time, p.Threads)
 }
 
-func (p Params) validate() error {
+// Validate reports whether these parameters are inside the band a stored hash may carry.
+//
+// The band is parse's, not a second opinion: minting something Verify would refuse is a
+// hash that works nowhere, which is a worse failure than being told no.
+func (p Params) Validate() error {
 	switch {
 	case p.Memory < minMemory || p.Memory > maxMemory:
 		return fmt.Errorf("%w: memory %d KiB is outside %d-%d", ErrMalformed, p.Memory, minMemory, maxMemory)
