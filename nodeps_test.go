@@ -2,6 +2,7 @@ package kyprimitives
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -67,17 +68,29 @@ func TestModuleDependenciesAreAllowlisted(t *testing.T) {
 
 // Only the password package may import outside the standard library. This is the check
 // that keeps the budget from spreading once it exists.
+//
+// It discovers packages rather than listing them, so a package added later is covered
+// without anyone remembering to add it here.
 func TestOnlyPasswordImportsADependency(t *testing.T) {
-	for _, dir := range []string{"capsule", "shamir", "auditchain"} {
-		entries, err := os.ReadDir(dir)
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, dir := range entries {
+		if !dir.IsDir() || dir.Name() == "password" || dir.Name() == "testdata" || strings.HasPrefix(dir.Name(), ".") {
+			continue
+		}
+		files, err := os.ReadDir(dir.Name())
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, e := range entries {
+		for _, e := range files {
 			if !strings.HasSuffix(e.Name(), ".go") {
 				continue
 			}
-			src, err := os.ReadFile(dir + "/" + e.Name())
+			checked++
+			src, err := os.ReadFile(filepath.Join(dir.Name(), e.Name()))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -87,9 +100,13 @@ func TestOnlyPasswordImportsADependency(t *testing.T) {
 					if strings.HasPrefix(imp, selfModule) {
 						continue
 					}
-					t.Errorf("%s/%s imports %s; only password may", dir, e.Name(), imp)
+					t.Errorf("%s/%s imports %s; only password may", dir.Name(), e.Name(), imp)
 				}
 			}
 		}
 	}
+	if checked == 0 {
+		t.Fatal("no package files were checked, so this test proves nothing")
+	}
+	t.Logf("checked %d files outside password", checked)
 }
