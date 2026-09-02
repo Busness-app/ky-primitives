@@ -18,7 +18,7 @@ func buildChain(t *testing.T, key []byte, n int) (string, auditchain.Anchor) {
 	var sb strings.Builder
 	enc := json.NewEncoder(&sb)
 	for i := 0; i < n; i++ {
-		rec, err := chain.Append("auth.login", "user1")
+		rec, err := chain.Append(func(auditchain.Record, auditchain.Anchor) error { return nil }, "auth.login", "user1")
 		if err != nil {
 			t.Fatalf("Append failed: %v", err)
 		}

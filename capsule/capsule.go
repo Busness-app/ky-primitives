@@ -32,6 +32,8 @@ var (
 	ErrCapsuleEntryType = errors.New("capsule contains an entry that is not a regular file")
 	// ErrTargetNotEmpty reports a restore target that already has contents.
 	ErrTargetNotEmpty = errors.New("restore target directory is not empty")
+	// ErrDuplicatePath reports two members that normalise to one destination.
+	ErrDuplicatePath = errors.New("capsule contains two paths that normalise to the same destination")
 )
 
 // File is one member of a capsule's payload.

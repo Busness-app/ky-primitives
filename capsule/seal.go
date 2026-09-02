@@ -68,7 +68,18 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 }
 
 // buildPayload writes the files as a gzipped tar, the plaintext both containers hold.
+//
+// Every limit Open enforces is enforced here too. Sealing is the only place the failure
+// is cheap: a capsule that Open refuses is a backup that cannot be restored, and it was
+// previously reachable by sealing one file past the limit, or two paths that normalise to
+// one destination.
 func buildPayload(files []File) ([]byte, error) {
+	if len(files) > maxCapsuleFiles {
+		return nil, fmt.Errorf("%w: %d files, Open permits %d", ErrCapsuleTooLarge, len(files), maxCapsuleFiles)
+	}
+	var total int64
+	seen := make(map[string]struct{}, len(files))
+
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gw)
@@ -79,6 +90,19 @@ func buildPayload(files []File) ([]byte, error) {
 		name, err := safeRelPath(f.Path)
 		if err != nil {
 			return nil, err
+		}
+		if _, dup := seen[name]; dup {
+			return nil, fmt.Errorf("%w: %q", ErrDuplicatePath, name)
+		}
+		seen[name] = struct{}{}
+
+		size := int64(len(f.Content))
+		if size > maxCapsuleFileBytes {
+			return nil, fmt.Errorf("%w: %q is %d bytes, Open permits %d", ErrCapsuleTooLarge, name, size, maxCapsuleFileBytes)
+		}
+		total += size
+		if total > maxCapsuleExpandedTotal {
+			return nil, fmt.Errorf("%w: payload exceeds %d bytes", ErrCapsuleTooLarge, maxCapsuleExpandedTotal)
 		}
 		mode := f.Mode.Perm() & 0700
 		if mode == 0 {

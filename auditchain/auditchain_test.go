@@ -9,6 +9,9 @@ import (
 
 var key = bytes.Repeat([]byte{0x5a}, 32)
 
+// discard is the persister for tests that are not exercising persistence.
+func discard(Record, Anchor) error { return nil }
+
 func build(t *testing.T, rows ...[]string) []Record {
 	t.Helper()
 	c, err := New(key)
@@ -17,7 +20,7 @@ func build(t *testing.T, rows ...[]string) []Record {
 	}
 	var out []Record
 	for _, fields := range rows {
-		rec, err := c.Append(fields...)
+		rec, err := c.Append(discard, fields...)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -128,7 +131,7 @@ func TestResumeContinuesAnExistingChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	third, err := c.Append("c")
+	third, err := c.Append(discard, "c")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,7 +157,7 @@ func TestAnchorTracksTheChain(t *testing.T) {
 	if got := c.Anchor(); got.Count != 0 {
 		t.Fatalf("fresh chain anchor is %+v", got)
 	}
-	rec, err := c.Append("a")
+	rec, err := c.Append(discard, "a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +244,7 @@ func generatedChain(n int) func(func(Record, error) bool) {
 			return
 		}
 		for i := 0; i < n; i++ {
-			rec, err := c.Append("event")
+			rec, err := c.Append(discard, "event")
 			if err != nil {
 				yield(Record{}, err)
 				return

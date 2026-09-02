@@ -104,33 +104,62 @@ func read(path string, size int) ([]byte, error) {
 	return key, nil
 }
 
+// writeAll is indirected so the failed-write test can produce a real short write.
+var writeAll = func(f *os.File, s string) error {
+	_, err := f.WriteString(s)
+	return err
+}
+
 // create writes a fresh key, failing if the path already exists.
+//
+// The key is written to a uniquely named temporary file in the same directory, fsynced,
+// and only then linked to its final name. Writing straight to the final name meant a
+// short write or a full disk left partial hex at the real path — and because this package
+// refuses to replace an unreadable key, that partial file is permanent until someone
+// deletes it by hand.
 func create(path string, size int) ([]byte, error) {
 	key := make([]byte, size)
 	if _, err := randRead(key); err != nil {
 		return nil, fmt.Errorf("keyfile: %w", err)
 	}
 
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".keyfile-*.tmp")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("keyfile: %w", err)
 	}
-	if _, err := f.WriteString(hex.EncodeToString(key)); err != nil {
-		f.Close()
+	tmpName := tmp.Name()
+	// Removed on every failure path below; a no-op once the rename has consumed it.
+	defer func() {
+		tmp.Close()
+		os.Remove(tmpName)
+	}()
+
+	// CreateTemp makes the file 0600 already; set it explicitly so the guarantee does not
+	// depend on that staying true.
+	if err := tmp.Chmod(0600); err != nil {
+		return nil, fmt.Errorf("keyfile: %w", err)
+	}
+	if err := writeAll(tmp, hex.EncodeToString(key)); err != nil {
 		return nil, fmt.Errorf("keyfile: %w", err)
 	}
 	// Without the fsync a crash here leaves a zero-length file that the next boot reads
 	// as a corrupt key, which is the failure the refusal above then reports forever.
-	if err := f.Sync(); err != nil {
-		f.Close()
+	if err := tmp.Sync(); err != nil {
 		return nil, fmt.Errorf("keyfile: %w", err)
 	}
-	if err := f.Close(); err != nil {
+	if err := tmp.Close(); err != nil {
 		return nil, fmt.Errorf("keyfile: %w", err)
 	}
-	// And without syncing the directory the file's name can be lost even though its
-	// contents were durable.
-	if err := syncDir(filepath.Dir(path)); err != nil {
+
+	// os.Link rather than os.Rename: rename would silently replace a key another process
+	// created while we were writing, and this package must never destroy a key.
+	if err := os.Link(tmpName, path); err != nil {
+		return nil, err
+	}
+	// And without syncing the directory the name can be lost even though its contents
+	// were durable.
+	if err := syncDir(dir); err != nil {
 		return nil, err
 	}
 	return key, nil
