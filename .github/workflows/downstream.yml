@@ -29,19 +29,39 @@ jobs:
         # A breaking change cannot be fixed in one commit across two repositories.
         # Prefer a consumer branch named like this PR's head branch so a coordinated
         # change can be tested as a pair; otherwise use the consumer's default branch.
+        # ls-remote --exit-code returns 2 for "ref not found" and something else for
+        # a transient failure (auth, network, DNS, rate limit) that must not be read
+        # as absence -- that would silently test the wrong branch and go green.
         env:
           GH_TOKEN: ${{ secrets.SUITE_READ_TOKEN }}
           HEAD_REF: ${{ github.head_ref }}
         run: |
           set -euo pipefail
           repo="https://x-access-token:${GH_TOKEN}@github.com/Busness-app/${{ matrix.consumer }}.git"
-          if [ -n "${HEAD_REF}" ] && git ls-remote --exit-code --heads "${repo}" "${HEAD_REF}" >/dev/null 2>&1; then
-            echo "Pairing with ${{ matrix.consumer }} branch ${HEAD_REF}"
-            git clone --depth 1 --branch "${HEAD_REF}" "${repo}" "${{ matrix.consumer }}"
+          branch=""
+          if [ -n "${HEAD_REF}" ]; then
+            set +e
+            git ls-remote --exit-code --heads "${repo}" "${HEAD_REF}" >/dev/null
+            status=$?
+            set -e
+            if [ "${status}" -eq 0 ]; then
+              branch="${HEAD_REF}"
+            elif [ "${status}" -ne 2 ]; then
+              echo "ls-remote against ${{ matrix.consumer }} exited ${status}, not a clean absence (2); refusing to fall back to the default branch" >&2
+              exit "${status}"
+            fi
+          fi
+          if [ -n "${branch}" ]; then
+            echo "Pairing with ${{ matrix.consumer }} branch ${branch}"
+            git clone --depth 1 --branch "${branch}" "${repo}" "${{ matrix.consumer }}"
           else
             echo "Using ${{ matrix.consumer }} default branch"
             git clone --depth 1 "${repo}" "${{ matrix.consumer }}"
           fi
+          # The clone URL embeds the token and git wrote it into .git/config. The next
+          # steps run this consumer's own build/test code from this directory, so drop
+          # git history and the token together rather than trying to scrub just one.
+          rm -rf "${{ matrix.consumer }}/.git"
 
       - uses: actions/setup-go@v5
         with:
