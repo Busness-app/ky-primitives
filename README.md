@@ -1,9 +1,22 @@
 # ky-primitives
 
-Shared security primitives for the Busness.app suite. Standard library only, no
-dependencies, ever — `TestModuleHasNoDependencies` fails the build if `go.mod` ever grows a
-`require`, because a module heavier than the standard library is one `kysignon-server`
-cannot take.
+Shared security primitives for the Busness.app suite.
+
+The dependency budget is **`golang.org/x/crypto` and the `golang.org/x/sys` it drags in,
+and nothing else.** Everything but `password` is standard-library-only. The rule was "no
+dependencies, ever" so that products with minimal trees could import this for free —
+`kypassword-server`'s `go.mod` requires nothing at all — and Argon2 is the one thing that
+broke it: the suite standardised on it for password hashing, and it is neither in the
+standard library nor on a proposal track.
+
+Two tests hold that line. `TestModuleDependenciesAreAllowlisted` fails on any `require`
+outside the budget; `TestOnlyPasswordImportsADependency` fails if `capsule`, `shamir` or
+`auditchain` ever import one. A consumer that only wants `capsule` compiles none of
+`x/crypto`, but it does inherit the requirement in its own `go.mod` — that is the cost.
+
+`go list -m all` names five `golang.org/x` modules because they sit in `x/crypto`'s own
+requirement graph. Only two reach `go.sum`, and the build compiles three packages:
+`x/sys/cpu`, `x/crypto/blake2b` and `x/crypto/argon2`.
 
 A primitive belongs here when the suite's copies of it disagree in a way that silently
 corrupts or loses recovery data. Duplicated HTTP, session and header code across the suite
@@ -138,3 +151,51 @@ err = auditchain.Verify(key, records, anchor)
 `Fields` are opaque and storage is not this package's business. The three implementations
 logged different things and wrote to JSON lines, a file and a database; forcing one schema
 on them is what made them diverge, and where the bytes went was never the part that broke.
+
+## password
+
+Hashes and verifies passwords with Argon2id.
+
+The suite ran three algorithms and five parameter sets:
+
+| Repos | Algorithm | Parameters |
+|---|---|---|
+| `ky_server_base`, `gridlock-server` | Argon2id | m=64 MiB, **t=1**, p=4 |
+| `kysignon-server`, `kyrecovery-server` | Argon2id | m=64 MiB, t=3, p=4 |
+| `kydns-server` | Argon2id | m=64 MiB, t=3, **p=2** |
+| `kynotes-server`, `kypost-server` | scrypt | N=2^17 |
+| `kybookmarks-server` | scrypt | **N=2^15** |
+
+The Argon2 encodings are mutually parseable, so a hash minted at t=1 verified in a t=3
+product at a third of the intended attacker cost and nothing flagged it. This package is
+the one answer: RFC 9106's second recommended profile, **m=64 MiB, t=3, p=4**, self-describing
+in PHC form. The first recommended profile asks for 2 GiB, which no login endpoint can
+afford per request.
+
+**A malformed stored hash is an error, never a fallback.** `ky_server_base` and
+`gridlock-server` re-split the string when the parameter segment fails to parse and, if it
+merely starts with `$argon2id$`, verify against their compiled defaults instead. `parse`
+here requires all six PHC segments, the exact algorithm, version 19, and three readable
+parameters.
+
+**Parameters are bounded on the way in.** A stored hash is attacker-controlled wherever the
+store is, and `m=4294967295` asks for 4 TiB and OOM-kills the process on the next login
+rather than failing it. Accepted: 8–256 MiB, t 1–10, p 1–16, salt ≥8 bytes, hash ≥16.
+`kypost-server` bounds its scrypt equivalent for exactly this reason; nothing on the Argon2
+side did.
+
+**Derivations are bounded and shed rather than queue.** Four concurrent slots at 64 MiB caps
+derivation memory at 256 MiB. Past a 2-second wait `Hash` and `Verify` return `ErrBusy`, which
+callers should answer 503 to and must **not** spend a lockout strike on — the server is saying
+"not now", not the user getting the password wrong. `kynotes-server` bounds the same way but
+blocks forever, so a burst parks unbounded goroutines and overload reports itself as a wrong
+password.
+
+```go
+encoded, err := password.Hash(plaintext)        // "$argon2id$v=19$m=65536,t=3,p=4$..."
+ok, err := password.Verify(plaintext, encoded)  // ErrMalformed, never a silent default
+stale, err := password.NeedsRehash(encoded)     // upgrade on next successful login
+```
+
+`Verify` accepts a weaker-but-valid hash so a deployment rehashes on login instead of
+locking everyone out. Pair it with `NeedsRehash`; no Argon2 repo in the suite had either.
