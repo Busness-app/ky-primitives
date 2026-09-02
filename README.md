@@ -53,8 +53,19 @@ total past 255 — because a manifest that records recovery topology without che
 sends a custodian looking for shares that were never issued.
 
 ```go
-files, err := capsule.Open(raw, key, "/var/restore")
+m, files, err := capsule.Open(raw, key, "/var/restore")
 raw, key, err := capsule.Seal(name, version, files, nil, nil, 2, 3)
+```
+
+`Open` returns the manifest because a successful `Open` is the only proof it was not
+rewritten. `ReadUnverifiedManifest` reads one without a key and returns a different type,
+`UnverifiedManifest`, so the compiler stops it reaching anything that decides on it — a
+threshold read without the key is a threshold anyone who can reach the file chose.
+
+```go
+m, files, err := capsule.Open(raw, key, "/var/restore")   // authenticated
+m, files, err := capsule.Open(raw, key, "")               // decode only, writes nothing
+u, err := capsule.ReadUnverifiedManifest(raw)             // no key; show, do not decide
 ```
 
 The ciphertext field is standard base64 in and out. Decoding used to also accept raw-url,
@@ -176,10 +187,12 @@ Three implementations existed, with three tuple layouts and three key policies:
 | Truncation | anchor beside the key | undetectable | sequence numbers in the DB |
 | Fields | joined on bare `\|` | joined on bare `\|` | details pre-hashed |
 
-`kybookmarks-server/internal/audit/audit.go:44` substitutes
-`"kybookmarks-audit-default-secret"` when no key is configured, so an unconfigured
-deployment ships a chain anyone can recompute from the repository — and `VerifyChain` still
-passes. The key floor here is 32 bytes and there is no fallback.
+`kybookmarks-server/internal/audit/audit.go:41` keeps a literal,
+`"kybookmarks-default-hmac-secret"`, and its write path no longer reaches it —
+`loadOrCreateKey` has no constant fallback. What survives is narrower and still real: the
+literal is what `legacyHash` verifies v0 entries against, so a wholly-forged log on a first
+boot with no state file converts cleanly through `converge` and verifies forever. The key
+floor here is 32 bytes and there is no fallback at all.
 
 Every field is length-prefixed. Joining on a delimiter lets a field containing it shift
 into its neighbour and produce another record's digest, forging a record without the key;
@@ -215,6 +228,17 @@ rec, err := chain.Append(ctx, func(r auditchain.Record, a auditchain.Anchor) err
 err = auditchain.Verify(key, records, anchor)
 err = auditchain.VerifyStream(key, rows, anchor) // same, for a log too large to hold
 ```
+
+`VerifyRecord` asks whether a record carries its own digest, and nothing about where it
+sits. It also refuses a record numbered zero or carrying a malformed hash, because `Append`
+mints neither — a legacy log numbered from zero is exactly what a migration probe hands it.
+`Resume` answers a different question — is this the tail — and needs the anchor to do
+it. A conversion probe wants the first.
+
+`Replay` builds a chain in memory from field tuples and hands back the records with their
+final anchor, for a bulk rewrite that writes the log once. `Append`'s persist parameter
+means the chain advances only when the store agrees; passing one that does nothing per
+record would satisfy the signature and mean the opposite.
 
 Chains in this suite reach six figures, and the bug that follows from paging them is
 specific: `kyrecovery-server`'s `VerifyChain` read a fixed 100000 events and then reported a
@@ -294,6 +318,12 @@ waiters can never each hold part of what the other needs.
 The PHC parser compares against the canonical spelling rather than scanning. `fmt.Sscanf`
 reads the fields it is asked for and ignores the rest, so `p=4TRAILINGGARBAGE`, `p=04` and
 `v=19GARBAGE` all verified clean.
+
+`HashWith` mints at chosen parameters, bounded to the same band `Verify` accepts, for a
+test suite that cannot afford 64 MiB per derivation. `Hash` is the suite's answer and what
+production code calls. `DummyVerify` spends a verification's cost on a reject path that
+never reached one, so a missing account does not answer faster than a wrong password —
+though `ErrBusy` returns without deriving, so under load that leak reopens.
 
 ```go
 encoded, err := password.Hash(plaintext)        // "$argon2id$v=19$m=65536,t=3,p=4$..."
@@ -389,6 +419,32 @@ were secret.
 key, err := keyfile.LoadOrCreate(filepath.Join(dir, "audit.key"), 32)
 ```
 
+`LoadOrCreate` and `Load` are hex; `LoadOrCreateEncoded` and `LoadEncoded` take an
+`Encoding` — `Hex`, `Raw` or `Base64` — because four products already wrote their key
+files those ways: `kydns-server` writes a raw 32-byte ed25519 seed, `kysignon-server`
+writes raw, `kynotes-server` and `kypost-server` write base64. A package that can only read
+hex is a package those four cannot adopt.
+
+`Load` never creates. `kypost-server` runs a daemon and an API process against the same
+key file, and the daemon must never mint a key the API process did not — when both are
+allowed to create, a restart in the wrong order leaves half the data under a key that no
+longer exists, and nothing reports it: every write succeeds, and every old read fails as
+though the data were corrupt.
+
+`FromEnv` reads a key from an environment variable, hex or base64, and validates it exactly
+as a file-supplied key would — set-but-unparseable is an error, not a fall-through to the
+file. Four products check an environment variable before the file; doing that outside this
+package means the env-supplied key skips every check the file-supplied one gets.
+
+```go
+key, err := keyfile.LoadOrCreateEncoded(path, 32, keyfile.Base64)
+key, err := keyfile.Load(path, 32)                       // never creates
+key, ok, err := keyfile.FromEnv("KY_AUDIT_KEY", 32)       // ok is false when unset
+```
+
+A hex key file is lowercase hex with exactly one trailing newline — 65 bytes for a 32-byte
+key. That format is pinned by `TestHexFileFormat`.
+
 ## derive
 
 The login secret a client sends in place of a password: PBKDF2-SHA256 stretched, then
@@ -421,6 +477,11 @@ slot really is a core. The budget is `derive`'s own rather than `password`'s bec
 package is standard-library-only by design and importing `password` would pull `x/crypto`
 into it. `SyntheticSalt` lower-cases the username, because keying anything off the raw string
 lets one account present as many and quietly multiplies any per-account budget above it.
+
+`AuthSecretContext` bounds the wait for a slot. The budget stays separate from
+`password`'s — the two bound different resources, and this package importing `password`
+would pull `x/crypto` into it — but `derive.MaxConcurrent`, `password.MaxMemoryKiB` and
+`password.MaxLanes` are exported so a product running both can add them up.
 
 ## Contributing
 
