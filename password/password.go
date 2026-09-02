@@ -242,6 +242,37 @@ func Hash(plaintext string) (string, error) {
 	return hashWith(plaintext, DefaultParams())
 }
 
+const dummyPlaintext = "dummy verification plaintext"
+
+// dummyHash is minted once, on first use, at whatever the current parameters are — so
+// DummyVerify costs what a real verification costs even after those parameters move.
+//
+// Lazily rather than at package init: Hash acquires a slot from this package's limiter, and
+// a package-level var that calls it would run that acquire during package initialisation,
+// whose ordering against the limiter's own initialisation Go does not guarantee.
+var dummyHash = sync.OnceValue(func() string {
+	h, err := Hash(dummyPlaintext)
+	if err != nil {
+		// Only reachable if Hash cannot mint at its own defaults, which means the package
+		// is misconfigured rather than the caller.
+		panic("password: cannot mint the dummy hash: " + err.Error())
+	}
+	return h
+})
+
+// DummyVerify spends the cost of a verification and reports nothing.
+//
+// A login that answers "no such account" faster than "wrong password" enumerates accounts.
+// Call this on every reject path that did not reach a real Verify, so the two cost the
+// same.
+//
+// It is not perfect and should not be sold as such: Verify can return ErrBusy without
+// deriving anything, and that path is fast. Under load the oracle reopens. Shedding is
+// still the right answer to overload — just do not describe this as constant time.
+func DummyVerify() {
+	_, _ = Verify(dummyPlaintext, dummyHash())
+}
+
 // HashWith derives a PHC-encoded Argon2id hash at the given parameters.
 //
 // Hash is the suite's answer and what production code should call. This exists for two
@@ -299,7 +330,10 @@ func Verify(plaintext, encoded string) (bool, error) {
 func NeedsRehash(encoded string) (bool, error) {
 	p, _, _, err := parse(encoded)
 	if err != nil {
-		return false, err
+		// A hash this package did not write is not stale — it is not ours. Rehashing on a
+		// guess is how a product ends up re-minting a format it cannot read. Verify still
+		// refuses it outright; that is where a malformed hash must be an error.
+		return false, nil
 	}
 	d := DefaultParams()
 	return p.Memory < d.Memory || p.Time < d.Time || p.Threads != d.Threads, nil
