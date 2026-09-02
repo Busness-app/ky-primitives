@@ -16,15 +16,6 @@ type FileEntry struct {
 	Mode os.FileMode `json:"mode"`
 }
 
-// Dependency is one thing a service needs that is not in the capsule — an environment
-// variable, a port, a peer. A restore that produces every file and none of these produces
-// a service that does not start, so they are recorded rather than remembered.
-type Dependency struct {
-	Kind  string `json:"kind"`
-	Name  string `json:"name"`
-	Value string `json:"value,omitempty"`
-}
-
 // UnverifiedManifest is a capsule's manifest read without its key.
 //
 // Every field here is attacker-controlled wherever the capsule file is. The manifest is
@@ -55,6 +46,11 @@ type UnverifiedManifest struct {
 //
 // The embedded field is not an accident: a Manifest can be read wherever the fields are
 // wanted, but an UnverifiedManifest cannot be passed where a Manifest is required.
+//
+// A Manifest is authenticated, not validated. Open proves the manifest is the one that was
+// sealed under this key; it does not re-apply Seal's topology rule, so a kit recorded as
+// 0-of-0 by some other writer opens without complaint. Check the numbers you intend to act
+// on.
 type Manifest struct {
 	UnverifiedManifest
 }
