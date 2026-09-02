@@ -28,6 +28,11 @@ const KycapFileFormat = "kycap/2"
 // bytes of JSON; a megabyte of it is already absurd.
 const maxManifestBytes = 1 << 20
 
+// maxContainerBytes bounds attacker-controlled input before JSON parsing and base64
+// decoding can make additional copies of it. The plaintext ceiling is 256 MiB; this leaves
+// room for base64 expansion, the manifest and archive framing.
+const maxContainerBytes = 384 << 20
+
 // manifest is the capsule's description of itself. Every field of it is authenticated.
 type manifest struct {
 	CapsuleID   string    `json:"capsule_id"`
@@ -59,6 +64,9 @@ type kycapFile struct {
 // decryptPayload parses the container, decrypts it under the manifest, and returns the
 // hash-verified gzipped tar payload.
 func decryptPayload(raw, key []byte) ([]byte, error) {
+	if err := checkContainerSize("container", len(raw)); err != nil {
+		return nil, err
+	}
 	if len(bytes.TrimLeft(raw, " \t\r\n")) == 0 {
 		return nil, ErrUnknownContainer
 	}
@@ -72,6 +80,9 @@ func decryptPayload(raw, key []byte) ([]byte, error) {
 	}
 	if cf.Ciphertext == "" {
 		return nil, fmt.Errorf("%w: container carries no ciphertext", ErrCorruptCapsule)
+	}
+	if err := checkContainerSize("encoded ciphertext", len(cf.Ciphertext)); err != nil {
+		return nil, err
 	}
 	if len(cf.Manifest) > maxManifestBytes {
 		return nil, fmt.Errorf("%w: manifest is %d bytes", ErrCorruptCapsule, len(cf.Manifest))
@@ -102,6 +113,13 @@ func decryptPayload(raw, key []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to decrypt capsule: %w", err)
 	}
 	return payload, verifyPayloadHash(payload, m.PayloadHash)
+}
+
+func checkContainerSize(part string, size int) error {
+	if size > maxContainerBytes {
+		return fmt.Errorf("%w: %s is %d bytes, limit is %d", ErrCapsuleTooLarge, part, size, maxContainerBytes)
+	}
+	return nil
 }
 
 func newGCM(key []byte) (cipher.AEAD, error) {

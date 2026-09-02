@@ -82,6 +82,20 @@ func TestSplitRejectsBadParameters(t *testing.T) {
 	}
 }
 
+func TestRejectsOversizedSecretsAndShares(t *testing.T) {
+	tooLarge := make([]byte, MaxSecretBytes+1)
+	if _, err := Split(tooLarge, 2, 2); err == nil {
+		t.Fatal("oversized secret was accepted")
+	}
+	shares := []Share{
+		{Threshold: 2, Index: 1, Value: tooLarge},
+		{Threshold: 2, Index: 2, Value: tooLarge},
+	}
+	if _, err := Combine(shares); !errors.Is(err, ErrShareLength) {
+		t.Fatalf("oversized shares: got %v, want ErrShareLength", err)
+	}
+}
+
 // The three 0x11d implementations panic here. A custodian retrying a shard mid-disaster
 // must get an error, never a stack trace.
 func TestCombineRejectsDuplicateIndex(t *testing.T) {

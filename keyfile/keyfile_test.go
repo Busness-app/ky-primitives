@@ -124,6 +124,21 @@ func TestRequireOwnerOnly(t *testing.T) {
 	}
 }
 
+func TestRejectsSymlinkKey(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	link := filepath.Join(dir, "link")
+	if err := os.WriteFile(real, []byte("00"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := RequireOwnerOnly(link); !errors.Is(err, ErrUnsafe) {
+		t.Fatalf("symlink: got %v, want ErrUnsafe", err)
+	}
+}
+
 // Five of the seven implementations read then write with no exclusion, so two starters
 // each mint a key and one silently wins — after the loser has already sealed data under
 // the key that is about to vanish.
