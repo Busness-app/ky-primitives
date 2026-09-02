@@ -95,13 +95,19 @@ its own. A failed extraction rolls back whatever it wrote, because the target mu
 to start and a half-restored keyset otherwise poisons every retry.
 
 Refused: path traversal, absolute paths, backslash separators, NUL bytes, symlinks,
-hardlinks, directories, device nodes, FIFOs, archives over 8 GiB expanded, members over
-4 GiB, more than 4096 files, and any restore into a non-empty directory. File modes are
-clamped to owner-only — a restored capsule carries signing keys, and an archive header is
-attacker-controlled.
+hardlinks, directories, device nodes, FIFOs, two members that normalise to one
+destination, archives over 256 MiB expanded, members over 64 MiB, more than 4096 files,
+and any restore into a non-empty directory. File modes are clamped to owner-only — a
+restored capsule carries signing keys, and an archive header is attacker-controlled.
 
-Every one of those is covered by a test in `capsule/hardening_test.go`. None is asserted
-without one.
+The two size numbers are memory budgets rather than archive sizes, because `Open` holds
+the raw container, the decrypted payload and every expanded member at once. They are the
+values `capsule/extract.go` enforces; raising them is what a streaming `Open` is for.
+
+Every refusal in that list is covered by a test in `capsule/hardening_test.go` or
+`capsule/review_test.go`, with one exception: the 256 MiB expansion budget and the 64 MiB
+member ceiling are exercised on the `Seal` side only, and `capsule/limits_test.go` asserts
+the constants rather than the refusal. An extraction-side test for both is outstanding.
 
 ### Fixtures
 
