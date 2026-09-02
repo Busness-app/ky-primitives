@@ -26,7 +26,7 @@ func buildChain(t *testing.T, n int) ([]Record, Anchor) {
 	var recs []Record
 	var anchor Anchor
 	for i := 0; i < n; i++ {
-		rec, err := c.Append(func(r Record, a Anchor) error {
+		rec, err := c.Append(context.Background(), func(r Record, a Anchor) error {
 			recs = append(recs, r)
 			anchor = a
 			return nil
@@ -61,7 +61,7 @@ func TestResumeAcceptsTheTailWithItsAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the real tail and its own anchor were refused: %v", err)
 	}
-	rec, err := c.Append(func(Record, Anchor) error { return nil }, "next")
+	rec, err := c.Append(context.Background(), func(Record, Anchor) error { return nil }, "next")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestAppendWaiterGivesUpWhenTheStoreHangs(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = c.Append(func(Record, Anchor) error {
+		_, _ = c.Append(context.Background(), func(Record, Anchor) error {
 			close(entered)
 			<-hung
 			return nil
@@ -136,7 +136,7 @@ func TestAppendWaiterGivesUpWhenTheStoreHangs(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	start := time.Now()
-	_, err = c.AppendContext(ctx, func(Record, Anchor) error { return nil }, "second")
+	_, err = c.Append(ctx, func(Record, Anchor) error { return nil }, "second")
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("got %v, want context.DeadlineExceeded while the store is hung", err)
 	}
@@ -155,17 +155,17 @@ func TestAGivenUpAppendLeavesTheChainWhereItWas(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Append(func(Record, Anchor) error { return nil }, "first"); err != nil {
+	if _, err := c.Append(context.Background(), func(Record, Anchor) error { return nil }, "first"); err != nil {
 		t.Fatal(err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := c.AppendContext(ctx, func(Record, Anchor) error { return nil }, "shed"); err == nil {
+	if _, err := c.Append(ctx, func(Record, Anchor) error { return nil }, "shed"); err == nil {
 		t.Fatal("a cancelled append was accepted")
 	}
 
-	rec, err := c.Append(func(Record, Anchor) error { return nil }, "second")
+	rec, err := c.Append(context.Background(), func(Record, Anchor) error { return nil }, "second")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -149,18 +149,12 @@ func Resume(key []byte, last Record, anchor Anchor) (*Chain, error) {
 // stored without its anchor left the opposite inconsistency — with no way to roll either
 // back. persist runs under the same lock that reserves the sequence number, so it should
 // write the record and the anchor together and return.
-func (c *Chain) Append(persist func(Record, Anchor) error, fields ...string) (Record, error) {
-	return c.AppendContext(context.Background(), persist, fields...)
-}
-
-// AppendContext is Append with a deadline on the wait for the chain lock.
-//
-// ctx bounds the wait, not persist. Once persist is running it holds the sequence number
-// it reserved and cannot be abandoned without leaving the chain unsure whether the record
-// was stored — which is the whole reason persist runs under the lock. Give persist its own
-// timeout, and do not call back into the Chain from it: the lock is not reentrant, and the
-// anchor it would ask for is already one of its arguments.
-func (c *Chain) AppendContext(ctx context.Context, persist func(Record, Anchor) error, fields ...string) (Record, error) {
+// ctx bounds the wait for the chain lock, not persist. Once persist is running it holds
+// the sequence number it reserved and cannot be abandoned without leaving the chain unsure
+// whether the record was stored — which is the whole reason persist runs under the lock.
+// Give persist its own timeout, and do not call back into the Chain from it: the lock is
+// not reentrant, and the anchor it would ask for is already one of its arguments.
+func (c *Chain) Append(ctx context.Context, persist func(Record, Anchor) error, fields ...string) (Record, error) {
 	if persist == nil {
 		return Record{}, errors.New("auditchain: a persist function is required; the chain cannot advance without knowing the record is stored")
 	}

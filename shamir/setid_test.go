@@ -1,7 +1,6 @@
 package shamir
 
 import (
-	"errors"
 	"strings"
 	"testing"
 )
@@ -67,43 +66,20 @@ func TestSetIDIsWideEnoughToSurviveManySplits(t *testing.T) {
 	if shares[0].SetID == ([16]byte{}) {
 		t.Fatal("set identifier is zero, so two secrets would look like one set")
 	}
-	if !strings.HasPrefix(shares[0].String(), VersionV2+"-") {
-		t.Fatalf("Split emits %q, want the %s wire format", shares[0].String(), VersionV2)
+	if !strings.HasPrefix(shares[0].String(), Version+"-") {
+		t.Fatalf("Split emits %q, want the %s wire format", shares[0].String(), Version)
 	}
 }
 
-// A wider identifier is a new wire format, and the old one is on custodian cards that were
-// printed and put in envelopes. Those still have to parse, or the format change is a
-// recovery failure rather than a hardening.
-func TestParseShareStillReadsKy1Cards(t *testing.T) {
-	got, err := ParseShare("ky1-2-a1b2c3d4-2-a1b2-0eec")
-	if err != nil {
-		t.Fatalf("a ky1 custodian card no longer parses: %v", err)
+// The 32-bit format is not parsed. Nothing outside this package ever wrote a share, so
+// there are no cards to strand — and a narrow identifier accepted "for compatibility" is
+// the collision the widening was for, still reachable.
+func TestParseShareRejectsTheNarrowSetID(t *testing.T) {
+	if _, err := ParseShare("ky1-2-a1b2c3d4-2-a1b2-0eec"); err == nil {
+		t.Fatal("a 32-bit set id parsed")
 	}
-	if got.Threshold != 2 || got.Index != 2 {
-		t.Fatalf("parsed %d-of-?, index %d", got.Threshold, got.Index)
-	}
-	want := [16]byte{12: 0xa1, 13: 0xb2, 14: 0xc3, 15: 0xd4}
-	if got.SetID != want {
-		t.Fatalf("ky1 set id widened to %x, want %x", got.SetID, want)
-	}
-}
-
-// Two ky1 cards that disagreed in their 32 bits must still disagree once widened, or the
-// compatibility path throws away the check it is preserving.
-func TestWidenedKy1SetIDsStayDistinct(t *testing.T) {
-	a, err := ParseShare("ky1-2-a1b2c3d4-2-a1b2-0eec")
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, err := ParseShare("ky1-3-9f2a71c4-1-aabb-0632")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if a.SetID == b.SetID {
-		t.Fatal("two different ky1 set ids widened to the same value")
-	}
-	if _, err := Combine([]Share{a, b}); !errors.Is(err, ErrShareSet) {
-		t.Fatalf("got %v, want ErrShareSet combining across two ky1 splits", err)
+	// Right tag, wrong id width.
+	if _, err := ParseShare("ky2-2-a1b2c3d4-2-a1b2-0eec"); err == nil {
+		t.Fatal("a ky2 share carrying a 32-bit set id parsed")
 	}
 }

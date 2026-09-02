@@ -29,33 +29,38 @@ Reads and writes the suite's encrypted backup containers.
 
 Two containers hold real recovery data on disk, and they cannot read each other:
 
-| Container | Written by | Shape |
+One container, `kycap/2`: a JSON object holding the manifest, a base64 ciphertext with the
+nonce prefixed, and nothing else. The manifest is bound into the AEAD, so every field
+describing the capsule is authenticated rather than merely present. It is carried and
+authenticated as the exact bytes that were read, not a re-encoding of a decoded struct, so
+nothing depends on two encoders agreeing forever.
+
+Two containers came before it and both are retired:
+
+| Container | Was written by | Why it is gone |
 |---|---|---|
-| `kycap/1` | `kysignon-server` | JSON object, base64 ciphertext string, nonce prefixed |
-| `kycap/2` | this package | `kycap/1` with the manifest bound in as AAD |
-| tar | `kyrecovery-server` | tar of `manifest.json`, `nonce.bin`, `payload.enc`, AAD-bound |
+| `kycap/1` | `kysignon-server` | Authenticated its ciphertext and nothing else |
+| tar | `kyrecovery-server` | Authenticated its ciphertext and its own `aad` string, not the rest of the manifest |
 
-`Open` reads all three and always will — dropping any orphans backups already on disk.
-`Seal` writes `kycap/2` only, so the suite stops accumulating formats.
-
-`kycap/1` authenticates its ciphertext and nothing else. Its `capsule_id`, `service_name`,
-`threshold`, `total_shares` and verification recipe were all rewritable by someone who
-never learned the key, so a 2-of-3 kit could be restated as 1-of-1 and still open. `kycap/2`
-binds the manifest bytes into the AEAD. The manifest is carried and authenticated as the
-exact bytes that were read, not a re-encoding of a decoded struct, so nothing depends on
-two encoders agreeing forever.
-
-**Readers migrate before writers.** A product still on the old reader cannot open a
-`kycap/2` capsule.
+In both, `capsule_id`, `service_name`, `threshold`, `total_shares` and the verification
+recipe were rewritable by anyone who could reach the file, without the key — a 2-of-3 kit
+could be restated as 1-of-1 and still open. Neither server needs its old capsules read, so
+the readers were retired rather than kept: a reader that half-trusts a manifest cannot tell
+its caller which half.
 
 `Seal` refuses a kit that cannot exist — `threshold` below 2, above `totalShares`, or a
 total past 255 — because a manifest that records recovery topology without checking it
 sends a custodian looking for shares that were never issued.
 
 ```go
-files, err := capsule.Open(raw, key, "/var/restore")   // either container
+files, err := capsule.Open(raw, key, "/var/restore")
 raw, key, err := capsule.Seal(name, version, files, nil, nil, 2, 3)
 ```
+
+The ciphertext field is standard base64 in and out. Decoding used to also accept raw-url,
+for capsules `ky_server_base` and `gridlock-server` encoded that way and never persisted;
+with one writer left, a second accepted spelling is only a second thing that has to stay
+true.
 
 `key` is raw bytes, never a hex string. The suite's implementations disagreed on that and
 bytes is the one that cannot be got wrong silently: a hex string of the right length is a
@@ -148,11 +153,12 @@ four ways a custodian gets this wrong. Each field is there for one of them.
 `Combine` still uses every share it is given; passing more than the threshold is correct.
 Bind a hash of the plaintext alongside anyway — `capsule`'s payload hash is that check.
 
-`ky1` cards still parse; they were printed and put in envelopes. Their 32-bit set id was
-too narrow for its job — two splits collided with even odds after about 65,000 of them, and
-a collision means the check silently does not happen — so `ky2` carries 128 bits and a ky1
-id widens into the low four bytes. A ky1 share re-rendered prints as `ky2`, so render at
-split time.
+The set id is 128 bits. The first version of this format carried 32, which reached even
+odds of a collision after about 65,000 splits — a number a deployment issuing recovery kits
+reaches — and a collision means the check the field exists for silently does not happen.
+The narrow format is not parsed: nothing outside this package ever wrote a share, so there
+are no cards to strand, and a narrow id accepted "for compatibility" is the same collision
+still reachable.
 
 Every share must declare a threshold of 2..255. It used to be enforced only above zero,
 which is what an absent field decodes to, so a `Share` filled in by a deserialiser landed
@@ -196,14 +202,14 @@ minted a sequence number that already existed. The anchor is the only thing that
 where the end is. Sequence 0 and `MaxUint64` are refused: `Append` starts at one, and
 minting `count+1` from the top wraps to zero.
 
-`AppendContext` bounds the wait for the chain lock, not `persist`. `persist` still runs
-under the lock — the record and its anchor have to be written together — so give it its own
+`Append` takes a `context.Context`, which bounds the wait for the chain lock, not
+`persist`. `persist` still runs under the lock — the record and its anchor have to be written together — so give it its own
 timeout, and do not call back into the `Chain` from it: the lock is not reentrant, and the
 anchor it would ask for is already one of its arguments.
 
 ```go
 chain, err := auditchain.New(key)          // or Resume(key, lastRecord, anchor)
-rec, err := chain.Append(func(r auditchain.Record, a auditchain.Anchor) error {
+rec, err := chain.Append(ctx, func(r auditchain.Record, a auditchain.Anchor) error {
     return store.WriteRecordAndAnchor(r, a) // one transaction
 }, "login", user)
 err = auditchain.Verify(key, records, anchor)

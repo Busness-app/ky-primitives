@@ -31,23 +31,15 @@ import (
 // suite's 0x11d implementations byte-indistinguishable from one of these, and combining
 // across the two returns a different secret with no error at all. The tag is what turns
 // that into a refusal.
-const Version = "ky1"
+const Version = "ky2"
 
-// VersionV2 is the wire format this package writes. It is ky1 with a 128-bit set
-// identifier in place of a 32-bit one.
+// setIDBytes is the width of a set identifier.
 //
-// 32 bits was too narrow for what the field is for. Two splits collide with even odds
-// after roughly 65,000 of them, and a collision means the one check standing between a
-// custodian and a silently wrong secret is not there. ky1 cards are still read: they were
-// printed and put in envelopes, and a format change that strands them is a recovery
-// failure rather than a hardening.
-//
-// A ky1 share re-rendered through String prints as ky2, with its 32 bits in the low four
-// bytes. That is a different card than the one it was read from, so render at split time,
-// not on the way back.
-const VersionV2 = "ky2"
-
-// setIDBytes is the width of a ky2 set identifier.
+// 128 bits, because a collision means the check the field exists for silently does not
+// happen. The first version of this format carried 32, which reached even odds of a
+// collision after about 65,000 splits — a number a deployment issuing recovery kits
+// actually reaches. That version is not parsed: nothing outside this package ever wrote a
+// share, so there are no cards to strand.
 const setIDBytes = 16
 
 var (
@@ -94,7 +86,7 @@ func (s Share) String() string {
 }
 
 func (s Share) body() string {
-	return VersionV2 +
+	return Version +
 		"-" + strconv.Itoa(s.Threshold) +
 		"-" + hex.EncodeToString(s.SetID[:]) +
 		"-" + strconv.Itoa(int(s.Index)) +
@@ -114,15 +106,7 @@ func ParseShare(encoded string) (Share, error) {
 	if len(parts) != 6 {
 		return Share{}, fmt.Errorf("%w: %d fields, want 6", ErrShareVersion, len(parts))
 	}
-	// Both formats are read. They differ only in the width of the set id, so the widths
-	// are what tells them apart.
-	var idWidth int
-	switch parts[0] {
-	case Version:
-		idWidth = 8
-	case VersionV2:
-		idWidth = 2 * setIDBytes
-	default:
+	if parts[0] != Version {
 		return Share{}, fmt.Errorf("%w: tag %q", ErrShareVersion, parts[0])
 	}
 
@@ -135,17 +119,12 @@ func ParseShare(encoded string) (Share, error) {
 	if err != nil || threshold < 2 || threshold > 255 {
 		return Share{}, fmt.Errorf("%w: threshold %q", ErrMalformedShare, parts[1])
 	}
-	if len(parts[2]) != idWidth {
-		return Share{}, fmt.Errorf("%w: set id %q is %d characters, %s carries %d", ErrMalformedShare, parts[2], len(parts[2]), parts[0], idWidth)
-	}
+	var setID [setIDBytes]byte
 	idBytes, err := hex.DecodeString(parts[2])
-	if err != nil {
+	if err != nil || len(idBytes) != setIDBytes {
 		return Share{}, fmt.Errorf("%w: set id %q", ErrMalformedShare, parts[2])
 	}
-	// A ky1 identifier keeps its value and moves to the low bytes, so two cards that
-	// disagreed in 32 bits still disagree in 128.
-	var setID [setIDBytes]byte
-	copy(setID[setIDBytes-len(idBytes):], idBytes)
+	copy(setID[:], idBytes)
 	index, err := strconv.Atoi(parts[3])
 	if err != nil {
 		return Share{}, fmt.Errorf("%w: %v", ErrMalformedShare, err)

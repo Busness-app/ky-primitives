@@ -17,8 +17,8 @@ func TestShareStringIsVersionedAndSelfDescribing(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, s := range shares {
-		if !strings.HasPrefix(s.String(), VersionV2+"-") {
-			t.Fatalf("share %q does not begin with the version tag %q", s, VersionV2)
+		if !strings.HasPrefix(s.String(), Version+"-") {
+			t.Fatalf("share %q does not begin with the version tag %q", s, Version)
 		}
 		if s.Threshold != 3 {
 			t.Fatalf("share carries threshold %d, want 3", s.Threshold)

@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Seal writes a kycap/1 container and returns it with the freshly generated AES-256 key
+// Seal writes a kycap/2 container and returns it with the freshly generated AES-256 key
 // that opens it.
 //
 // Seal does not split the key into Shamir shares. The kycap/1 container has never carried
@@ -77,7 +77,7 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 	// and the AAD is the manifest's exact bytes. A pretty container that cannot be opened
 	// is not a trade worth making.
 	raw, err = json.Marshal(kycapFile{
-		Format:     KycapFileFormatV2,
+		Format:     KycapFileFormat,
 		Manifest:   manifestBytes,
 		Ciphertext: EncodeCiphertext(sealed),
 	})
