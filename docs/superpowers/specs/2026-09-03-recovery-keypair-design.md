@@ -285,10 +285,15 @@ halves, and both are used.
    `FromSeed(skRm).Public().Bytes() == pkRm` — 32 bytes in, 1216 out.
 2. Same vector: `FromSeed(skRm).Public().ID()` equals the hex SHA-256 of `pkRm`, computed in
    the test from the vector's bytes rather than from the implementation.
-3. From RFC 9180 (Go's `rfc9180.json`, suite `0x0020 / 0x0001 / 0x0002`, X25519 with
-   HKDF-SHA256 and AES-256-GCM): `hpke.NewRecipient(enc, skRm, HKDFSHA256, AES256GCM, info)`
-   followed by `Open(aad, ct)` reproduces `pt` for the first encryption. This pins the key
-   schedule and AEAD path `capsule.Open` will use; test 1 pins the KEM it will use.
+3. From the RFC 9180 companion vectors published by the CFRG at
+   `github.com/cfrg/draft-irtf-cfrg-hpke/test-vectors.json` (suite `0x0020 / 0x0001 /
+   0x0002`, X25519 with HKDF-SHA256 and AES-256-GCM): `hpke.NewRecipient(enc, skRm,
+   HKDFSHA256, AES256GCM, info)` followed by `Open(aad, ct)` reproduces `pt` for the first
+   encryption. This pins the key schedule and AEAD path `capsule.Open` will use; test 1
+   pins the KEM it will use. The RFC's own appendix lists only seven suites and this is not
+   one of them; the companion file is the working group's, covers all 128, and is what Go's
+   `rfc9180.json` was derived from — but Go's copy keeps only accumulated checksums of the
+   encryptions, so the individual ciphertext must come from the CFRG file.
 
 **Behavioural, one claim each:**
 
@@ -348,7 +353,7 @@ added to the retirement table, and `## recoverykey` is added between `## capsule
 | 3 | Every `crypto/hpke` KEM rebuilds its private key from a 32-byte seed | M | `hybridKEM.NewPrivateKey` refuses `len != 32` (`pq.go:254`); `dhKEM.NewPrivateKey` takes the curve's 32-byte key |
 | 4 | Hybrid `PrivateKey.Bytes()` returns the seed only if built from one | M | `pq.go:318-323`: returns error when `seed == nil` |
 | 5 | Published X-Wing vectors exist with `skRm` 32 B, `pkRm` 1216 B, `enc` 1120 B | M | `hpke-pq.json`, two vectors for `0x647a`; one with HKDF-SHA256 + ChaCha20-Poly1305, one with SHAKE256 |
-| 6 | No published X-Wing vector uses AES-256-GCM; RFC 9180 covers HKDF-SHA256 + AES-256-GCM with X25519 | M | `hpke-pq.json` has `aead_id 0x0003` for both `0x647a` vectors; `rfc9180.json` has `0x0020/0x0001/0x0002` |
+| 6 | No published X-Wing vector uses AES-256-GCM; the CFRG companion vectors cover HKDF-SHA256 + AES-256-GCM with X25519, with individual ciphertexts | M | `hpke-pq.json` has `aead_id 0x0003` for both `0x647a` vectors; CFRG `test-vectors.json` entry `0x0020/0x0001/0x0002` fetched 2026-09-03, first encryption `aad="Count-0"`, 45-byte `ct` |
 | 7 | `hpke.Sender.Seal` takes an AAD and sequences nonces; single-shot `hpke.Seal` takes none | M | `hpke.go:171-195` |
 | 8 | Sealing to the public key leaves no data key reachable by the caller | P | Test 4 plus a code review that no exported symbol returns or accepts one |
 | 9 | Both new manifest fields are inside the AAD | P | Tests 6 and 7 |
