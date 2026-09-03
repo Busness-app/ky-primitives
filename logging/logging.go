@@ -21,9 +21,9 @@ const (
 // format: JSON lines. A syslog renderer on stderr would duplicate a frame the collector
 // agent supplies for us.
 type Config struct {
-	App   string     // required; identifies the product on every line
-	Level slog.Level // default is slog.LevelInfo, the zero value
-	Out   io.Writer  // default os.Stderr
+	App   string       // required; identifies the product on every line
+	Level slog.Leveler // default is slog.LevelInfo when nil, the zero value; a *slog.LevelVar works
+	Out   io.Writer    // default os.Stderr
 }
 
 // FromEnv reads KY_LOG_LEVEL. App and Out are still the caller's to set, so configuration
@@ -38,9 +38,11 @@ func FromEnv() (Config, error) {
 	if !ok || raw == "" {
 		return cfg, nil
 	}
-	if err := cfg.Level.UnmarshalText([]byte(strings.ToUpper(raw))); err != nil {
+	var lvl slog.Level
+	if err := lvl.UnmarshalText([]byte(strings.ToUpper(raw))); err != nil {
 		return Config{}, errors.New("logging: KY_LOG_LEVEL is not a level: " + raw)
 	}
+	cfg.Level = lvl
 	return cfg, nil
 }
 
@@ -89,9 +91,11 @@ func (l *Logger) Security(ctx context.Context, ev Event, fs ...Field) {
 	l.emit(ctx, l.sec, ev, nil, fs)
 }
 
-// emit is the one path to a line. extra carries attributes only this package can build,
-// which is how audit records reach the handler.
-func (l *Logger) emit(ctx context.Context, to *slog.Logger, ev Event, extra []slog.Attr, fs []Field) {
+// buildAttrs assembles one line's attributes: the event, then extra (attributes only this
+// package can build, which is how audit records reach the handler), then the fields.
+// Shared by emit and Audit, so the two paths that write a line never drift apart on what
+// goes on it.
+func buildAttrs(ev Event, extra []slog.Attr, fs []Field) []slog.Attr {
 	attrs := make([]slog.Attr, 0, len(fs)+len(extra)+1)
 	attrs = append(attrs, slog.Any("event", eventValue{name: ev.name}))
 	attrs = append(attrs, extra...)
@@ -100,7 +104,12 @@ func (l *Logger) emit(ctx context.Context, to *slog.Logger, ev Event, extra []sl
 			attrs = append(attrs, a)
 		}
 	}
-	to.LogAttrs(ctx, ev.level, ev.message, attrs...)
+	return attrs
+}
+
+// emit is the one path to an ordinary line, level-gated by LogAttrs.
+func (l *Logger) emit(ctx context.Context, to *slog.Logger, ev Event, extra []slog.Attr, fs []Field) {
+	to.LogAttrs(ctx, ev.level, ev.message, buildAttrs(ev, extra, fs)...)
 }
 
 type requestIDKey struct{}

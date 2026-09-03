@@ -66,9 +66,9 @@ func checkLine(t *testing.T, out string) map[string]any {
 	}
 	body := strings.TrimSuffix(out, "\n")
 	for _, r := range body {
-		// r != '\t' never actually fires: sanitize replaces a raw tab with U+FFFD
-		// before slog ever sees one, so no literal tab byte reaches this loop.
-		if r < 0x20 && r != '\t' || r == 0x7f {
+		// sanitize is what keeps a raw control character off the line; this loop is
+		// the one place that would notice if it ever stopped.
+		if r < 0x20 || r == 0x7f {
 			t.Fatalf("a raw control character reached the line: %q", body)
 		}
 	}

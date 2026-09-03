@@ -356,9 +356,10 @@ func TestFromEnv(t *testing.T) {
 		name    string
 		env     string
 		wantErr bool
+		wantNil bool // unset: Config's zero value, meaning Info once New sees it
 		want    slog.Level
 	}{
-		{name: "unset reads as info", env: "", want: slog.LevelInfo},
+		{name: "unset reads as info", env: "", wantNil: true},
 		{name: "valid lowercase level", env: "warn", want: slog.LevelWarn},
 		{name: "invalid level errors", env: "nope", wantErr: true},
 	}
@@ -375,9 +376,39 @@ func TestFromEnv(t *testing.T) {
 			if err != nil {
 				t.Fatalf("FromEnv: %v", err)
 			}
+			if c.wantNil {
+				if cfg.Level != nil {
+					t.Errorf("Level = %v, want nil", cfg.Level)
+				}
+				return
+			}
 			if cfg.Level != c.want {
 				t.Errorf("Level = %v, want %v", cfg.Level, c.want)
 			}
 		})
+	}
+}
+
+// TestConfigLevelVarFiltersAndCanChangeAtRuntime pins the fix for a review finding:
+// Config.Level was slog.Level, so a product could not install a *slog.LevelVar and adjust
+// verbosity at runtime (e.g. on SIGHUP) without a breaking change to this struct later.
+func TestConfigLevelVarFiltersAndCanChangeAtRuntime(t *testing.T) {
+	var lv slog.LevelVar
+	lv.Set(slog.LevelWarn)
+	var buf bytes.Buffer
+	lg, err := New(Config{App: "kytest", Level: &lv, Out: &buf})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	lg.Log(context.Background(), Started)
+	if buf.Len() != 0 {
+		t.Fatalf("an info event was written while the LevelVar held warn: %q", buf.String())
+	}
+
+	lv.Set(slog.LevelInfo)
+	lg.Log(context.Background(), Started)
+	if buf.Len() == 0 {
+		t.Error("lowering the LevelVar at runtime did not unblock an info event")
 	}
 }

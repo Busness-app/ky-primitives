@@ -131,6 +131,87 @@ func TestAuditFieldsMismatchWithholdsFlatKeysAndMarksTheLine(t *testing.T) {
 	}
 }
 
+func TestAuditWithNoFieldsEmitsNoMismatch(t *testing.T) {
+	// The most natural call: the product already holds rec and passes no fs. AuditFields()
+	// of nothing is empty, which must not be treated as disagreeing with rec.Fields.
+	lg, buf := newTestLogger(t, slog.LevelInfo)
+
+	chain, err := auditchain.New(testKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := AuditFields(UserID("u_1"))
+	rec, err := chain.Append(context.Background(), func(auditchain.Record, auditchain.Anchor) error { return nil }, fields...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lg.Audit(context.Background(), ShareRedeemed, rec)
+
+	m := oneLine(t, buf)
+	if _, present := m["audit_fields_mismatch"]; present {
+		t.Errorf("Audit with no fs set audit_fields_mismatch: %v", m["audit_fields_mismatch"])
+	}
+	raw, ok := m["fields"].([]any)
+	if !ok || len(raw) != 1 || raw[0] != "user_id=u_1" {
+		t.Fatalf("fields = %v, want the digested record unchanged: [user_id=u_1]", m["fields"])
+	}
+}
+
+func TestAuditBypassesTheLevelGate(t *testing.T) {
+	// A verbosity knob must never delete an audit record: chain.Append has already
+	// advanced the sequence by the time Audit runs, and a suppressed line here is
+	// indistinguishable from tampering. Built at Error, fed a Warn-level audit event —
+	// which LogAttrs would normally admit — to isolate the bypass from level filtering.
+	lg, buf := newTestLogger(t, slog.LevelError)
+
+	chain, err := auditchain.New(testKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := AuditFields(UserID("u_1"))
+	rec, err := chain.Append(context.Background(), func(auditchain.Record, auditchain.Anchor) error { return nil }, fields...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lg.Audit(context.Background(), ShareRedeemed, rec, UserID("u_1"))
+
+	m := oneLine(t, buf)
+	if m["event"] != "share_redeemed" {
+		t.Errorf("event = %v, want share_redeemed; the level gate suppressed the audit line", m["event"])
+	}
+}
+
+func TestShippedLinesVerifyAsAChainAtWarnLevelWithInfoAuditEvents(t *testing.T) {
+	// Reproduces the reviewer's finding directly: a logger built at Warn, fed a mix of
+	// Info- and Warn-level audit events, must still ship every line — otherwise
+	// VerifyStream reports a sequence gap that reads exactly like tampering.
+	lg, buf := newTestLogger(t, slog.LevelWarn)
+	key := testKey()
+
+	chain, err := auditchain.New(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := []Event{KeyCreated, ShareRedeemed, SessionCreated} // Info, Warn, Info
+	for i, ev := range events {
+		fields := AuditFields(UserID("u_1"), Count(int64(i)))
+		rec, err := chain.Append(context.Background(), func(auditchain.Record, auditchain.Anchor) error { return nil }, fields...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lg.Audit(context.Background(), ev, rec, UserID("u_1"), Count(int64(i)))
+	}
+	anchor := chain.Anchor()
+
+	shipped := buf.String()
+	if n := strings.Count(shipped, "\n"); n != len(events) {
+		t.Fatalf("shipped %d lines, want %d (one per audit call): %s", n, len(events), shipped)
+	}
+	if err := auditchain.VerifyStream(key, records(strings.NewReader(shipped)), anchor); err != nil {
+		t.Fatalf("shipped lines do not verify: %v\n%s", err, shipped)
+	}
+}
+
 // testKey is a fixed 32-byte chain key. Test data, never a real key.
 func testKey() []byte {
 	k := make([]byte, 32)

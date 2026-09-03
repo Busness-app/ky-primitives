@@ -39,7 +39,7 @@ const truncMarker = "…"
 func sanitize(s string) (string, bool) {
 	var b strings.Builder
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f || r == utf8.RuneError {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) || r == utf8.RuneError {
 			r = '�'
 		}
 		if b.Len()+utf8.RuneLen(r) > maxValueBytes-len(truncMarker) {
@@ -205,22 +205,46 @@ var (
 // fmt.Errorf with no %w carries whatever the caller put in it. It removes the accidental
 // case, which is the one that happens.
 //
-// The unwrap loop is bounded at 100 iterations to guard against cyclic error chains,
-// which would otherwise hang the goroutine. Real wrap chains are under ten deep, so
-// 100 is a guard rather than a policy.
+// errors.Join (and fmt.Errorf with multiple %w verbs) does not fit the single-chain walk:
+// errors.Unwrap returns nil for one, so a naive loop would stop at err.Error() and emit
+// every joined error's full text — the wrapper this function exists to drop. Instead each
+// joined branch is unwrapped to its own leaf and the leaf kinds are joined, so a joined
+// error leaks no more than a single wrapped one does.
+//
+// The unwrap walk is bounded at 100 steps total, shared across every branch of a joined
+// error, to guard against a cyclic error chain hanging the goroutine. Real wrap chains are
+// under ten deep, so 100 is a guard rather than a policy.
 func Err(err error) Field {
 	if err == nil {
 		return Field{}
 	}
-	for i := 0; i < 100; i++ {
+	budget := 100
+	return ErrorKind(unwrapKind(err, &budget))
+}
+
+// unwrapKind walks err to its deepest leaf's text, recursing into each branch of a joined
+// error and joining their leaf kinds with newlines. budget is shared across the whole
+// walk — every branch of every join draws from the same pool — so it bounds the total work
+// rather than resetting per branch.
+func unwrapKind(err error, budget *int) string {
+	for *budget > 0 {
+		*budget--
+		if joined, ok := err.(interface{ Unwrap() []error }); ok {
+			branches := joined.Unwrap()
+			kinds := make([]string, len(branches))
+			for i, b := range branches {
+				kinds[i] = unwrapKind(b, budget)
+			}
+			return strings.Join(kinds, "\n")
+		}
 		next := errors.Unwrap(err)
 		if next == nil {
-			return ErrorKind(err.Error())
+			return err.Error()
 		}
 		err = next
 	}
 	// Hit the depth bound; return what we're holding rather than looping forever.
-	return ErrorKind(err.Error())
+	return err.Error()
 }
 
 // ErrText emits the full error message, sanitized and capped. Use it when the message is

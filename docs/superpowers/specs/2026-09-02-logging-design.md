@@ -160,9 +160,9 @@ listening on the Unix socket.
 
 ```go
 type Config struct {
-    App   string      // required; emitted as "app", identifies the product
-    Level slog.Level  // default slog.LevelInfo
-    Out   io.Writer   // default os.Stderr
+    App   string        // required; emitted as "app", identifies the product
+    Level slog.Leveler  // default slog.LevelInfo when nil; a *slog.LevelVar works too
+    Out   io.Writer     // default os.Stderr
 }
 
 func FromEnv() (Config, error)  // reads KY_LOG_LEVEL; App and Out still set by the caller
@@ -245,9 +245,10 @@ What it removes is the accidental leak, which is the one that actually happens.
 
 **Reserved keys**, which the `Declare*` functions refuse: `timestamp`, `level`, `message`,
 `app`, `event`, `request_id`, `severity`, `facility`, `dropped_fields`,
-`truncated_fields`, and — because audit lines are flat — `seq`, `prev`, `hash`, `fields`.
-A declared field colliding with one of the last four would corrupt a chain record on its
-way through the log stream.
+`truncated_fields`, and — because audit lines are flat — `seq`, `prev`, `hash`, `fields`,
+`audit_fields_mismatch`. A declared field colliding with one of the four audit keys would
+corrupt a chain record on its way through the log stream; colliding with
+`audit_fields_mismatch` could claim a divergent line agrees after all.
 
 The handler drops reserved keys arriving as raw slog attributes and sets them itself, so a
 product mid-migration cannot contradict them. The four audit keys and `event` are stronger

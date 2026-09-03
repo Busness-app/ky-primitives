@@ -81,6 +81,12 @@ func renderValue(v slog.Value) string {
 // itself — seq, prev, hash, fields — always ships either way: it is what is authenticated,
 // and withholding it on a caller's mistake would cost the one thing meant to survive one.
 //
+// Audit ignores the configured level: it writes the handler directly rather than going
+// through LogAttrs, so no KY_LOG_LEVEL can suppress it. An audit record is evidence, not
+// verbosity — chain.Append has already advanced the sequence by the time Audit is called,
+// and a gap left by a dropped line is indistinguishable from tampering. A verbosity knob
+// is not allowed to manufacture a tamper alarm.
+//
 // The export handed to kyauditverify must be filtered to lines carrying hash: Log and
 // Security lines decode into a zero auditchain.Record without a JSON error, which
 // VerifyStream cannot tell apart from an attack.
@@ -89,10 +95,13 @@ func renderValue(v slog.Value) string {
 // tamper-evident chain that exists only on a machine the attacker may also own is not
 // evidence. This ships a copy; the product keeps writing its local chained file.
 func (l *Logger) Audit(ctx context.Context, ev Event, rec auditchain.Record, fs ...Field) {
-	mismatch := !slices.Equal(AuditFields(fs...), rec.Fields)
+	mismatch := len(fs) > 0 && !slices.Equal(AuditFields(fs...), rec.Fields)
 	av := auditValue{rec: rec, mismatch: mismatch}
 	if mismatch {
 		fs = nil
 	}
-	l.emit(ctx, l.sec, ev, []slog.Attr{slog.Any("audit", av)}, fs)
+	attrs := buildAttrs(ev, []slog.Attr{slog.Any("audit", av)}, fs)
+	r := slog.NewRecord(time.Now(), ev.level, ev.message, 0)
+	r.AddAttrs(attrs...)
+	_ = l.sec.Handler().Handle(ctx, r)
 }

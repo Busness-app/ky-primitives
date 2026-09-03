@@ -1,6 +1,8 @@
 package logging
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -28,6 +30,10 @@ func TestSanitizeReplacesControlCharacters(t *testing.T) {
 		{"delete", "a\x7fb", "a�b"},
 		{"tab", "a\tb", "a�b"},
 		{"invalid utf8", "a\xffb", "a�b"},
+		{"c1 control: CSI", "ab", "a�b"},
+		{"c1 control: NEL", "ab", "a�b"},
+		{"c1 control: PAD, range floor", "ab", "a�b"},
+		{"c1 control: APC, range ceiling", "ab", "a�b"},
 		{"clean text is untouched", `a "quoted" ] \ b`, `a "quoted" ] \ b`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -144,6 +150,23 @@ func TestErrDropsTheWrappingAndKeepsTheKind(t *testing.T) {
 	}
 	if text.key != "error_text" {
 		t.Errorf("key = %q, want error_text", text.key)
+	}
+
+	// errors.Join breaks the single-chain assumption: errors.Unwrap returns nil for it,
+	// so a naive walk would stop at err.Error() — the concatenation of every joined
+	// error's full text, wrapper included. Each branch must be unwrapped to its own leaf.
+	joined := errors.Join(context.Canceled, fmt.Errorf("opening /etc/kypassword/secret.key: %w", fs.ErrNotExist))
+	joinedKind := Err(joined)
+	joinedGot := joinedKind.val.v.String()
+	if strings.Contains(joinedGot, "secret.key") {
+		t.Errorf("Err leaked the wrapped path through errors.Join: %q", joinedGot)
+	}
+	wantJoined := "context canceled�file does not exist" // \n between leaves, sanitized to U+FFFD
+	if joinedGot != wantJoined {
+		t.Errorf("Err(joined) = %q, want %q", joinedGot, wantJoined)
+	}
+	if joinedKind.key != "error_kind" {
+		t.Errorf("key = %q, want error_kind", joinedKind.key)
 	}
 }
 
