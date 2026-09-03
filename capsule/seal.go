@@ -82,12 +82,14 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 		return nil, nil, Manifest{}, err
 	}
 	// The last limit Open enforces that sealing can reach. The manifest grows with caller
-	// input in several places — Files, deps, recipe, and the version strings — and none of
-	// them is individually bounded, which is why the whole marshalled manifest is what gets
-	// measured here rather than any one field. Seal used to return a key for an oversized
-	// manifest and every later read of it failed with ErrCorruptCapsule — a backup that
-	// cannot be restored, found at restore time. TestSealRefusesWhatOpenWouldRefuse holds
-	// this.
+	// input in several places — deps, recipe, and the version strings — and none of them is
+	// individually bounded, which is why the whole marshalled manifest is what gets
+	// measured here rather than any one field. The file list is not among them: it is not
+	// marshalled into the manifest at all, and buildPayload bounds it separately.
+	//
+	// Seal used to return a key for an oversized manifest and every later read of it failed
+	// with ErrCorruptCapsule — a backup that cannot be restored, found at restore time.
+	// TestSealRefusesWhatOpenWouldRefuse holds this, for both bounds.
 	if len(manifestBytes) > maxManifestBytes {
 		return nil, nil, Manifest{}, fmt.Errorf("%w: manifest is %d bytes, Open permits %d", ErrCapsuleTooLarge, len(manifestBytes), maxManifestBytes)
 	}
@@ -117,8 +119,11 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 // one file past the limit, or two paths that normalise to one destination.
 //
 // The entries are built here, from the normalised name and clamped mode this writes, so
-// the manifest describes the members a restore actually produces rather than the caller's
-// spelling of them. Built anywhere else they are a second normalisation to keep in step.
+// they describe the members a restore actually produces rather than the caller's spelling
+// of them. Built anywhere else they are a second normalisation to keep in step.
+//
+// They are also written here, as the reserved member, so the list the key protects and the
+// list Seal returns are one encoding of one slice.
 func buildPayload(files []File) ([]byte, []FileEntry, error) {
 	if len(files) > maxCapsuleFiles {
 		return nil, nil, fmt.Errorf("%w: %d files, Open permits %d", ErrCapsuleTooLarge, len(files), maxCapsuleFiles)
@@ -176,6 +181,32 @@ func buildPayload(files []File) ([]byte, []FileEntry, error) {
 			Sum:  hex.EncodeToString(fsum[:]),
 			Mode: mode,
 		})
+	}
+
+	// The file list, written last as the reserved member. Both limits are the ones Open
+	// applies to it: a capsule Seal writes is never one Open refuses. Nothing bounds a
+	// caller's path lengths individually, so a single absurd path is what these catch.
+	list, err := json.Marshal(entries)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(list) > maxFileListBytes {
+		return nil, nil, fmt.Errorf("%w: file list is %d bytes, Open permits %d", ErrCapsuleTooLarge, len(list), maxFileListBytes)
+	}
+	if total+int64(len(list)) > maxCapsuleExpandedTotal {
+		return nil, nil, fmt.Errorf("%w: payload exceeds %d bytes", ErrCapsuleTooLarge, maxCapsuleExpandedTotal)
+	}
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     reservedFileList,
+		Mode:     0600,
+		Size:     int64(len(list)),
+		Typeflag: tar.TypeReg,
+		ModTime:  time.Now().UTC(),
+	}); err != nil {
+		return nil, nil, err
+	}
+	if _, err := tw.Write(list); err != nil {
+		return nil, nil, err
 	}
 
 	if err := tw.Close(); err != nil {

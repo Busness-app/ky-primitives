@@ -27,6 +27,12 @@ const KycapFileFormat = "kycap/2"
 // bytes of JSON; a megabyte of it is already absurd.
 const maxManifestBytes = 1 << 20
 
+// maxFileListBytes bounds the encoded file list, which lives inside the payload rather
+// than the manifest. It is the budget that list had while it was a manifest field, kept
+// identical so that moving it did not quietly raise what a caller's path lengths can reach
+// — Seal refuses a list past this, and Open refuses to read one.
+const maxFileListBytes = maxManifestBytes
+
 // maxContainerBytes bounds attacker-controlled input before JSON parsing and base64
 // decoding can make additional copies of it. The plaintext ceiling is 256 MiB; this leaves
 // room for base64 expansion, the manifest and archive framing.

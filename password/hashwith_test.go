@@ -1,6 +1,7 @@
 package password_test
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,11 +73,17 @@ func TestHashWithIsNotCalledOutsideTests(t *testing.T) {
 		t.Fatalf("abs: %v", err)
 	}
 	visited := 0
-	err = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		if d.IsDir() {
+			if path != root && strings.HasPrefix(d.Name(), ".") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
 		visited++

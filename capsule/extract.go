@@ -4,6 +4,9 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,16 +32,30 @@ const (
 	maxCapsuleExpandedTotal = int64(256 << 20) // 256 MiB across the whole archive
 )
 
+// reservedFileList is the payload member carrying the encoded []FileEntry. It is metadata,
+// not a member of the backup: it is never returned in the []File and never written to
+// targetDir. TestReservedMemberIsNeitherReturnedNorWritten holds that.
+//
+// The name cannot collide with a caller's file. Every caller member is named by
+// safeRelPath, whose result is always filepath.Clean output, and Clean never returns a
+// path with a "./" prefix: it drops "." elements, and the only "." it can return is the
+// whole result, which safeRelPath rejects outright. So no input a caller can supply
+// produces this name — a caller asking for "./.kycap-files.json" gets ".kycap-files.json",
+// a different member that round-trips normally.
+// TestReservedNameIsUnreachableThroughSafeRelPath holds that, over the fuzz corpus too.
+const reservedFileList = "./.kycap-files.json"
+
 // extractPayload unpacks the decrypted gzipped tar into files, and onto disk when
-// targetDir is set.
+// targetDir is set. It also returns the file list carried in reservedFileList, empty for a
+// payload that has none.
 //
 // This is ported from kysignon-server, which carries the strongest extraction hardening
 // in the suite. Applying it to every container means a kyrecovery capsule opened here
 // gets path, type and size checks that its own Unpack never applied.
-func extractPayload(payload []byte, targetDir string) ([]File, error) {
+func extractPayload(payload []byte, targetDir string) ([]File, []FileEntry, error) {
 	gr, err := gzip.NewReader(bytes.NewReader(payload))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer gr.Close()
 
@@ -49,7 +66,7 @@ func extractPayload(payload []byte, targetDir string) ([]File, error) {
 
 	root, created, err := prepareTargetDir(targetDir)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if root != nil {
 		defer root.Close()
@@ -66,6 +83,8 @@ func extractPayload(payload []byte, targetDir string) ([]File, error) {
 	}()
 
 	var files []File
+	var entries []FileEntry
+	haveList := false
 	// Two members that normalise to one destination are a collision whether or not there is
 	// a target directory. On disk O_EXCL caught it as a bare EEXIST; with no target it was
 	// not caught at all, and Open returned two Files at the same Path for the caller to
@@ -77,28 +96,45 @@ func extractPayload(payload []byte, targetDir string) ([]File, error) {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 
 		// Only regular files are ever written into a capsule. Symlinks, hardlinks, device
 		// nodes and directories have no legitimate use here and each is a way to write
 		// somewhere the restore was not asked to touch.
 		if hdr.Typeflag != tar.TypeReg {
-			return nil, fmt.Errorf("%w: %s (type %q)", ErrCapsuleEntryType, hdr.Name, string(hdr.Typeflag))
+			return nil, nil, fmt.Errorf("%w: %s (type %q)", ErrCapsuleEntryType, hdr.Name, string(hdr.Typeflag))
 		}
+
+		// Before the file count, because the list is not one of the files: a capsule
+		// holding exactly maxCapsuleFiles members plus its list is one Seal writes.
+		// A second member under this name is refused rather than allowed to shadow the
+		// first — no caller can produce the name, so two of them is a crafted payload.
+		if hdr.Name == reservedFileList {
+			if haveList {
+				return nil, nil, fmt.Errorf("%w: %q", ErrDuplicatePath, reservedFileList)
+			}
+			entries, err = readFileList(tr)
+			if err != nil {
+				return nil, nil, err
+			}
+			haveList = true
+			continue
+		}
+
 		if len(files) >= maxCapsuleFiles {
-			return nil, fmt.Errorf("%w: more than %d files", ErrCapsuleTooLarge, maxCapsuleFiles)
+			return nil, nil, fmt.Errorf("%w: more than %d files", ErrCapsuleTooLarge, maxCapsuleFiles)
 		}
 		if hdr.Size < 0 || hdr.Size > maxCapsuleFileBytes {
-			return nil, fmt.Errorf("%w: %s declares %d bytes", ErrCapsuleTooLarge, hdr.Name, hdr.Size)
+			return nil, nil, fmt.Errorf("%w: %s declares %d bytes", ErrCapsuleTooLarge, hdr.Name, hdr.Size)
 		}
 
 		cleanName, err := safeRelPath(hdr.Name)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if _, dup := seen[cleanName]; dup {
-			return nil, fmt.Errorf("%w: %q", ErrDuplicatePath, cleanName)
+			return nil, nil, fmt.Errorf("%w: %q", ErrDuplicatePath, cleanName)
 		}
 		seen[cleanName] = struct{}{}
 
@@ -106,10 +142,10 @@ func extractPayload(payload []byte, targetDir string) ([]File, error) {
 		// over-long entry is detected rather than silently truncated.
 		data, err := io.ReadAll(io.LimitReader(tr, maxCapsuleFileBytes+1))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if int64(len(data)) > maxCapsuleFileBytes {
-			return nil, fmt.Errorf("%w: %s", ErrCapsuleTooLarge, hdr.Name)
+			return nil, nil, fmt.Errorf("%w: %s", ErrCapsuleTooLarge, hdr.Name)
 		}
 
 		// Clamp to owner-only. A restored capsule carries signing and encryption keys, and
@@ -123,13 +159,59 @@ func extractPayload(payload []byte, targetDir string) ([]File, error) {
 
 		if root != nil {
 			if err := writeInto(root, cleanName, data, mode); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
 
+	// The list is decoded from the payload, not derived from it, so until this point it
+	// can say anything: a path no member has, a digest for bytes that were not extracted,
+	// more entries than the file cap. Callers verify restores per-file against it, and the
+	// FileEntry doc promises them the normalised path and clamped mode extraction
+	// produced. TestFileListMustDescribeTheExtractedMembers holds that.
+	if haveList {
+		if err := reconcileFileList(entries, files); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	ok = true
-	return files, nil
+	return files, entries, nil
+}
+
+// reconcileFileList refuses a decoded list that does not describe the extracted files
+// exactly: one entry per file, in extraction order, every field equal. Seal writes the
+// list in member order from the same normalisation, so a capsule it sealed always passes.
+func reconcileFileList(entries []FileEntry, files []File) error {
+	if len(entries) != len(files) {
+		return fmt.Errorf("%w: file list has %d entries for %d members", ErrCorruptCapsule, len(entries), len(files))
+	}
+	for i, f := range files {
+		sum := sha256.Sum256(f.Content)
+		want := FileEntry{Path: f.Path, Size: int64(len(f.Content)), Sum: hex.EncodeToString(sum[:]), Mode: f.Mode}
+		if entries[i] != want {
+			return fmt.Errorf("%w: file list entry %d is %+v, member is %+v", ErrCorruptCapsule, i, entries[i], want)
+		}
+	}
+	return nil
+}
+
+// readFileList decodes the reserved member. The bound is the one the list had as a
+// manifest field, applied before json.Unmarshal can allocate against it; the +1 byte is
+// how an over-long list is detected rather than silently truncated.
+func readFileList(tr io.Reader) ([]FileEntry, error) {
+	data, err := io.ReadAll(io.LimitReader(tr, maxFileListBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxFileListBytes {
+		return nil, fmt.Errorf("%w: file list exceeds %d bytes", ErrCapsuleTooLarge, maxFileListBytes)
+	}
+	var entries []FileEntry
+	if err := json.Unmarshal(data, &entries); err != nil {
+		return nil, fmt.Errorf("%w: unreadable file list: %v", ErrCorruptCapsule, err)
+	}
+	return entries, nil
 }
 
 // rollback removes whatever a failed extraction wrote, returning the target to the empty

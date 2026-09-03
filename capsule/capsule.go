@@ -61,9 +61,14 @@ func Open(raw, key []byte, targetDir string) (Manifest, []File, error) {
 	if err != nil {
 		return Manifest{}, nil, err
 	}
-	files, err := extractPayload(payload, targetDir)
+	// The file list is inside the payload, so it is read only after decryptPayload has
+	// authenticated the container and verified the payload hash. A capsule sealed before
+	// v0.3.0 carries no such member and reports no files; its payload hash still covers
+	// every byte of it.
+	files, entries, err := extractPayload(payload, targetDir)
 	if err != nil {
 		return Manifest{}, nil, err
 	}
+	m.Files = entries
 	return Manifest{UnverifiedManifest: m}, files, nil
 }
