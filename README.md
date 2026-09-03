@@ -543,13 +543,23 @@ would pull `x/crypto` into it — but `derive.MaxConcurrent`, `password.MaxMemor
 
 ## Contributing
 
-`.github/workflows/downstream.yml` builds and tests the consumers in its matrix against
-your pull request — today `gridlock-server`, `kybookmarks-server` and `kypassword-server`,
-the three that import this module. The other six suite repositories do not yet, and are not
-watched; adding one is a matrix entry. A breaking change fails there, in your PR, rather
-than months later in a product nobody rebuilt.
+Nothing in this repository builds its consumers. The check that does lives in each of them:
+`.github/workflows/ky-primitives-compat.yml` in `gridlock-server`, `kybookmarks-server` and
+`kypassword-server` builds and tests that consumer against this module's default branch
+instead of the version it pins. It runs on a daily schedule and on `workflow_dispatch`, not
+on pull requests -- in either repository.
 
-To land a change that breaks a consumer, open a branch with the same name in the consumer
-repository. The job pairs them by branch name and tests the two together.
+It lives there rather than here because the dependency only points one way without a
+credential. A consumer, public or private, can read this repository anonymously; reaching a
+private consumer from here needed an organisation token, which is why the job that used to
+do it never ran.
 
-The job needs a `SUITE_READ_TOKEN` secret with `contents: read` on the organisation.
+**The cost is immediacy.** A change that breaks a consumer will not fail your pull request.
+It will fail in that consumer's scheduled run, up to a day later, in a repository you may not
+watch, and the person who sees it red will be someone whose own work is unrelated. If you are
+making a change you expect to break a consumer, do not wait for the schedule: open the
+consumer's PR alongside yours and run its compatibility workflow by hand from the Actions tab
+once this change is on `master`.
+
+The other six suite repositories do not import this module and have no such workflow; adding
+one is a copy of the file with the cron minute changed.

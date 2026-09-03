@@ -53,6 +53,15 @@
 
 ## Task 1: Downstream CI
 
+> **Superseded — do not implement as written.** `.github/workflows/downstream.yml` was
+> built, then removed. It required a `SUITE_READ_TOKEN` with organisation read access to
+> reach the private consumer, that secret was never created, and the job was the only
+> failing check on PR #8. The check now lives in each consumer as
+> `.github/workflows/ky-primitives-compat.yml`, cloning this public repository with no
+> secret at all. `SUITE_READ_TOKEN` is not needed and should not be created. See
+> `README.md` under `## Contributing`. The rest of this task is kept as a record only.
+
+
 **Files:**
 - Create: `.github/workflows/downstream.yml`
 
