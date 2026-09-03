@@ -53,7 +53,7 @@ func TestExtractRejectsPathTraversal(t *testing.T) {
 				[][]byte{[]byte("bad")})
 
 			dir := filepath.Join(t.TempDir(), "restore")
-			if _, err := extractPayload(payload, dir); !errors.Is(err, ErrPathTraversal) {
+			if _, _, err := extractPayload(payload, dir); !errors.Is(err, ErrPathTraversal) {
 				t.Fatalf("got %v, want ErrPathTraversal", err)
 			}
 		})
@@ -74,7 +74,7 @@ func TestExtractRejectsNonRegularFiles(t *testing.T) {
 				[][]byte{nil})
 
 			dir := filepath.Join(t.TempDir(), "restore")
-			if _, err := extractPayload(payload, dir); !errors.Is(err, ErrCapsuleEntryType) {
+			if _, _, err := extractPayload(payload, dir); !errors.Is(err, ErrCapsuleEntryType) {
 				t.Fatalf("got %v, want ErrCapsuleEntryType", err)
 			}
 		})
@@ -92,7 +92,7 @@ func TestExtractWritesNothingOutsideTarget(t *testing.T) {
 		[]*tar.Header{{Name: "../outside.txt", Mode: 0600, Size: 5, Typeflag: tar.TypeReg}},
 		[][]byte{[]byte("pwned")})
 
-	if _, err := extractPayload(payload, dir); err == nil {
+	if _, _, err := extractPayload(payload, dir); err == nil {
 		t.Fatal("traversal entry extracted without error")
 	}
 	if _, err := os.Stat(outside); !os.IsNotExist(err) {
@@ -109,7 +109,7 @@ func TestExtractRefusesNonEmptyTarget(t *testing.T) {
 		[]*tar.Header{{Name: "ok.txt", Mode: 0600, Size: 2, Typeflag: tar.TypeReg}},
 		[][]byte{[]byte("ok")})
 
-	if _, err := extractPayload(payload, dir); !errors.Is(err, ErrTargetNotEmpty) {
+	if _, _, err := extractPayload(payload, dir); !errors.Is(err, ErrTargetNotEmpty) {
 		t.Fatalf("got %v, want ErrTargetNotEmpty", err)
 	}
 }
@@ -128,7 +128,7 @@ func TestExtractRejectsTooManyFiles(t *testing.T) {
 	}
 	payload := hostilePayload(t, hdrs, bodies)
 
-	if _, err := extractPayload(payload, ""); !errors.Is(err, ErrCapsuleTooLarge) {
+	if _, _, err := extractPayload(payload, ""); !errors.Is(err, ErrCapsuleTooLarge) {
 		t.Fatalf("got %v, want ErrCapsuleTooLarge", err)
 	}
 }
@@ -145,7 +145,7 @@ func TestExtractClampsModeToOwnerOnly(t *testing.T) {
 		[][]byte{[]byte("a"), []byte("b"), []byte("c")})
 
 	dir := filepath.Join(t.TempDir(), "restore")
-	files, err := extractPayload(payload, dir)
+	files, _, err := extractPayload(payload, dir)
 	if err != nil {
 		t.Fatal(err)
 	}

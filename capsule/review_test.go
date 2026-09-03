@@ -56,16 +56,36 @@ func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 		}
 	})
 
-	// Under the file count and under every size limit, but the manifest these paths
-	// produce is past maxManifestBytes. Seal used to return a key for this container and
-	// both readers then refused it forever.
+	// Under the file count and under every size limit, but the manifest is past
+	// maxManifestBytes. Seal used to return a key for this container and both readers then
+	// refused it forever. Nothing bounds the recipe, so it is the growth path that stays
+	// once the file list has moved into the payload.
 	t.Run("manifest past what parseContainer permits", func(t *testing.T) {
+		recipe := map[string]any{"steps": strings.Repeat("s", maxManifestBytes)}
+		files := []File{{Path: "a.txt", Content: []byte("x"), Mode: 0600}}
+		_, _, _, err := Seal("t", "1", files, nil, recipe, 2, 3)
+		if !errors.Is(err, ErrCapsuleTooLarge) {
+			t.Fatalf("got %v, want ErrCapsuleTooLarge", err)
+		}
+		if !strings.Contains(err.Error(), "manifest") {
+			t.Fatalf("got %v, want the manifest bound", err)
+		}
+	})
+
+	// The same growth, now in the file list: nothing bounds a caller's path lengths, and
+	// the list is the payload member Open reads under maxFileListBytes. Seal must refuse
+	// what Open would refuse here too.
+	t.Run("file list past what Open permits", func(t *testing.T) {
 		files := make([]File, maxCapsuleFiles)
 		for i := range files {
 			files[i] = File{Path: fmt.Sprintf("%04d", i) + strings.Repeat("p", 196), Content: []byte("x"), Mode: 0600}
 		}
-		if _, _, _, err := Seal("t", "1", files, nil, nil, 2, 3); !errors.Is(err, ErrCapsuleTooLarge) {
+		_, _, _, err := Seal("t", "1", files, nil, nil, 2, 3)
+		if !errors.Is(err, ErrCapsuleTooLarge) {
 			t.Fatalf("got %v, want ErrCapsuleTooLarge", err)
+		}
+		if !strings.Contains(err.Error(), "file list") {
+			t.Fatalf("got %v, want the file-list bound", err)
 		}
 	})
 
@@ -178,7 +198,7 @@ func TestAFailedExtractionLeavesNothingBehind(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "restore")
 	payload := payloadFailingPartway(t)
 
-	if _, err := extractPayload(payload, target); !errors.Is(err, ErrCapsuleEntryType) {
+	if _, _, err := extractPayload(payload, target); !errors.Is(err, ErrCapsuleEntryType) {
 		t.Fatalf("got %v, want ErrCapsuleEntryType", err)
 	}
 
@@ -246,7 +266,7 @@ func TestExtractRejectsPathsThatCollideAfterNormalisation(t *testing.T) {
 			name = "into a target directory"
 		}
 		t.Run(name, func(t *testing.T) {
-			if _, err := extractPayload(payload, target); !errors.Is(err, ErrDuplicatePath) {
+			if _, _, err := extractPayload(payload, target); !errors.Is(err, ErrDuplicatePath) {
 				t.Fatalf("got %v, want ErrDuplicatePath", err)
 			}
 		})

@@ -35,6 +35,17 @@ describing the capsule is authenticated rather than merely present. It is carrie
 authenticated as the exact bytes that were read, not a re-encoding of a decoded struct, so
 nothing depends on two encoders agreeing forever.
 
+The manifest carries what identifies a capsule — `capsule_id`, `service_name`,
+`created_at`, `payload_hash` and the recovery topology — and no more. The per-member list
+of paths, sizes and SHA-256 digests travels inside the encrypted payload instead, as a
+reserved member, because the manifest is stored in the clear: a per-member digest read
+without the key is an offline confirmation oracle over the key material a capsule holds,
+and two capsules sharing one would show a signing key was never rotated between backups.
+`Open` fills `Manifest.Files` from inside the payload after the payload hash verifies;
+`ReadUnverifiedManifest` returns none, which is the right answer for a keyless read. This
+is the layout change behind `v0.3.0` — a `v0.2.0` capsule still opens, and reports no
+files, because it never carried an authenticated list.
+
 Two containers came before it and both are retired:
 
 | Container | Was written by | Why it is gone |
