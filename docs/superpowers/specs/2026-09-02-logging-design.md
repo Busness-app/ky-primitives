@@ -162,10 +162,18 @@ type Config struct {
     Out   io.Writer   // default os.Stderr
 }
 
-func FromEnv() Config          // reads KY_LOG_LEVEL; App and Out still set by the caller
+func FromEnv() (Config, error)  // reads KY_LOG_LEVEL; App and Out still set by the caller
 func New(Config) (*Logger, error)
 func (*Logger) Handler() slog.Handler
+
+func (*Logger) Log(ctx context.Context, ev Event, fs ...Field)
+func (*Logger) Security(ctx context.Context, ev Event, fs ...Field)
+func (*Logger) Audit(ctx context.Context, ev Event, rec auditchain.Record, fs ...Field)
 ```
+
+`FromEnv` returns an error rather than falling back to a default, because a misspelled
+`KY_LOG_LEVEL` that silently means `info` is how a product ends up logging nothing useful
+during the incident it was set for.
 
 `KY_LOG_LEVEL` is one name for all nine products, replacing kynotes' `KYNOTES_LOG_LEVEL`
 and kypost's `LogLevel` config key that nothing reads. There is no format variable,
@@ -181,10 +189,17 @@ configuration stays explicit at the call site.
 constructor produced, so there is no path for an arbitrary key or an arbitrary type.
 
 ```go
-lg.Info(ctx, logging.Started, logging.Version(v))
+lg.Log(ctx, logging.Started, logging.Version(v))
 lg.Security(ctx, logging.AuthFailed, logging.UserID(id), logging.RemoteIP(ip))
 // logging.Field("argon2_hash", h)   ← no such function; does not compile
 ```
+
+There is no caller-supplied message string anywhere in the typed API. `message` is a
+constant carried by the event, and the level comes from the event too. A free-text message
+parameter would be the one remaining channel for an accidental leak — `Log(ctx, AuthFailed,
+fmt.Sprintf("user %s failed", email))` defeats every other guarantee in this package — and
+carrying the text on the event also means the same event reads the same way in all nine
+products.
 
 Value types are `string`, `int64`, `bool` and `time.Time`. Not `any`, so a struct holding
 a token cannot be logged whole.
@@ -192,13 +207,17 @@ a token cannot be logged whole.
 The shared vocabulary starts from kynotes' 21 keys, which are the only field allowlist in
 the fleet and were chosen against a real product:
 
-`request_id`, `route`, `method`, `status`, `duration_ms`, `bytes`, `event`, `outcome`,
-`user_id`, `device_id`, `container_id`, `object_id`, `attachment_id`, `upload_id`,
-`session_id`, `audit_id`, `count`, `reason_code`, `retry_after_s`, `version`, `error_kind`
+`route`, `method`, `status`, `duration_ms`, `bytes`, `outcome`, `user_id`, `device_id`,
+`container_id`, `object_id`, `attachment_id`, `upload_id`, `session_id`, `audit_id`,
+`count`, `reason_code`, `retry_after_s`, `version`, `error_kind`
 
 plus `error_text`, and from what the other eight products log today: `remote_ip`,
 `user_agent`, `action`, `target_id`, `actor_id`, `capsule_id`, `share_index`, `zone`,
 `qname`.
+
+Two of kynotes' keys are reserved here rather than declarable. `event` is set from the
+event constant, and `request_id` is set from the context, so each has exactly one source
+and cannot be contradicted by a field of the same name.
 
 Products declare their own at package init, one function per value type so the returned
 constructor is typed:
@@ -222,9 +241,15 @@ greppable place", not "no key is ever wrong" — `DeclareString("password")` wou
 What it removes is the accidental leak, which is the one that actually happens.
 
 **Reserved keys**, which the `Declare*` functions refuse: `timestamp`, `level`, `message`,
-`app`, `event`, `severity`, `facility`, `dropped_fields`, `truncated_fields`, and —
-because audit lines are flat — `seq`, `prev`, `hash`, `fields`. A declared field colliding
-with one of the last four would corrupt a chain record on its way through the log stream.
+`app`, `event`, `request_id`, `severity`, `facility`, `dropped_fields`,
+`truncated_fields`, and — because audit lines are flat — `seq`, `prev`, `hash`, `fields`.
+A declared field colliding with one of the last four would corrupt a chain record on its
+way through the log stream.
+
+The handler drops reserved keys arriving as raw slog attributes and sets them itself, so a
+product mid-migration cannot contradict them. The four audit keys and `event` are stronger
+than that: they travel as values of unexported types, which code outside this package
+cannot construct. Raw slog cannot forge an audit record into the stream.
 
 ### Value sanitizing
 
@@ -279,8 +304,9 @@ configuration lives.
 
 ### Events and severity
 
-An event name is a declared constant, not a string, and carries a default severity. This
-is what makes a security event searchable across the suite.
+An event is a declared value, not a string. It carries its name, its human-readable
+message and its level, so all three agree across the suite and none of them is
+caller-supplied. This is what makes a security event searchable everywhere.
 
 Starter set, grounded in what the nine products log today: `started`, `stopped`,
 `config_loaded`, `auth_succeeded`, `auth_failed`, `auth_locked`, `session_created`,
@@ -288,8 +314,8 @@ Starter set, grounded in what the nine products log today: `started`, `stopped`,
 `key_created`, `key_rotated`, `capsule_sealed`, `capsule_opened`, `capsule_open_failed`,
 `share_issued`, `share_redeemed`, `recovery_code_redeemed`, `audit_chain_broken`.
 
-Products add their own with `DeclareEvent(name string, lvl slog.Level) Event`, which
-panics on a duplicate or malformed name for the same reason `Declare*` does.
+Products add their own with `DeclareEvent(name, message string, lvl slog.Level) Event`,
+which panics on a duplicate or malformed name for the same reason `Declare*` does.
 
 `level` is the slog level as a word. `severity` is the RFC 5424 number derived from that
 level — Debug 7, Info 6, Warn 4, Error 3 — so a collector routes on it without a mapping
