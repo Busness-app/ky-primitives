@@ -90,6 +90,8 @@ func TestDeclareRefusesBadNames(t *testing.T) {
 		{"reserved: audit key", "hash"},
 		{"reserved: line key", "message"},
 		{"reserved: single source", "request_id"},
+		{"slog builtin: time", "time"},
+		{"slog builtin: msg", "msg"},
 		{"uppercase", "UserName"},
 		{"leading digit", "1st_try"},
 		{"hyphen", "user-id"},
@@ -191,9 +193,10 @@ func TestErrBoundsUnwrapLoopOnCyclicChain(t *testing.T) {
 		if f.key != "error_kind" {
 			t.Errorf("key = %q, want error_kind", f.key)
 		}
-		// The value should be the error string (hand-derived: "cyclic error").
-		if got := f.val.v.String(); got != "cyclic error" {
-			t.Errorf("value = %q, want cyclic error", got)
+		// A cycle is exactly the budget running out, and what the walk holds then is a
+		// wrapper: the marker, never its text.
+		if got := f.val.v.String(); got != unwrapBudgetExceeded {
+			t.Errorf("value = %q, want %q", got, unwrapBudgetExceeded)
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Err() hung on cyclic error chain")
@@ -218,5 +221,32 @@ func TestErrToleratesANilJoinBranch(t *testing.T) {
 	got := Err(nilBranchJoinErr{})
 	if got.key != "error_kind" {
 		t.Errorf("key = %q, want error_kind", got.key)
+	}
+}
+
+// The budget is shared across every branch of a joined error and each wrapped branch
+// costs two steps, so a join of 50 wrapped errors exhausts it on the last branch, inside
+// the 256-byte value cap. Past that point the walk
+// used to return err.Error() of whatever it held -- an unwrapped wrapper, carrying exactly
+// the path or query text Err exists to drop -- and with short sentinel leaves the joined
+// value stays under the cap, so it reached the line. Batch operations that join per-item
+// errors are the realistic trigger.
+//
+// Written first against the err.Error() fallback, where the marker text reached the line.
+func TestErrLeaksNoWrapperTextPastTheUnwrapBudget(t *testing.T) {
+	const secret = "SECRET_PATH_IN_WRAPPER"
+	// One-byte leaves: the join separator sanitises to three bytes, so longer leaves push
+	// the exhaustion point past the value cap and the marker out of sight.
+	leaf := errors.New("x")
+	branches := make([]error, 50)
+	for i := range branches {
+		branches[i] = fmt.Errorf("open /var/%s/%d: %w", secret, i, leaf)
+	}
+	got := Err(errors.Join(branches...)).val.v.String()
+	if strings.Contains(got, secret) {
+		t.Fatalf("wrapper text reached the line once the unwrap budget ran out: %q", got)
+	}
+	if !strings.Contains(got, unwrapBudgetExceeded) {
+		t.Fatalf("budget exhaustion is not marked: %q", got)
 	}
 }

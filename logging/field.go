@@ -106,6 +106,13 @@ func register(name string) {
 	if reserved[name] {
 		panic("logging: " + name + " is reserved and set by the handler")
 	}
+	// renameSlogKeys rewrites slog's own built-in keys onto reserved output names, and
+	// JSONHandler emits record attrs after the built-ins with no de-duplication: a field
+	// declared as "msg" lands on the line as a second "message". Derived from the rename
+	// rather than listed, so the two cannot drift.
+	if renameSlogKeys(nil, slog.Attr{Key: name}).Key != name {
+		panic("logging: " + name + " is a slog built-in key the handler renames onto a reserved one")
+	}
 	if !keyPattern.MatchString(name) {
 		panic("logging: field name " + name + " must match [a-z][a-z0-9_]*")
 	}
@@ -249,9 +256,16 @@ func unwrapKind(err error, budget *int) string {
 		}
 		err = next
 	}
-	// Hit the depth bound; return what we're holding rather than looping forever.
-	return err.Error()
+	// Budget exhausted. What is held here is a wrapper, not a leaf, and wrapper text is
+	// what this function exists to drop -- a join of ~51 wrapped branches gets here with
+	// a path or a query in hand. A fixed marker leaks nothing and still says why.
+	return unwrapBudgetExceeded
 }
+
+// unwrapBudgetExceeded is the kind Err emits for whatever the walk was holding when the
+// budget ran out. TestErrLeaksNoWrapperTextPastTheUnwrapBudget holds that it is this and
+// not the wrapper's text.
+const unwrapBudgetExceeded = "error_kind_unwrap_budget_exceeded"
 
 // ErrText emits the full error message, sanitized and capped. Use it when the message is
 // needed and you have decided it is safe to store centrally. It greps.

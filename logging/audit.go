@@ -94,7 +94,13 @@ func renderValue(v slog.Value) string {
 // The record's storage stays with the product: auditchain deliberately owns none, and a
 // tamper-evident chain that exists only on a machine the attacker may also own is not
 // evidence. This ships a copy; the product keeps writing its local chained file.
-func (l *Logger) Audit(ctx context.Context, ev Event, rec auditchain.Record, fs ...Field) {
+//
+// The write error is returned, not dropped. A closed stderr, a pipe the collector has
+// stopped draining, a short write: each loses the shipped line, and a missing line is
+// indistinguishable from tampering at central verification. Whoever can stall the
+// collector must not be able to suppress evidence with nothing noticing, so the caller
+// gets to say what happens -- TestAuditReturnsTheWriteError.
+func (l *Logger) Audit(ctx context.Context, ev Event, rec auditchain.Record, fs ...Field) error {
 	if ctx == nil {
 		// LogAttrs does this for Log and Security; Handle does not, and this bypasses
 		// LogAttrs. A nil context is a caller bug, but Audit is the one path this wave
@@ -109,5 +115,5 @@ func (l *Logger) Audit(ctx context.Context, ev Event, rec auditchain.Record, fs 
 	attrs := buildAttrs(ev, []slog.Attr{slog.Any("audit", av)}, fs)
 	r := slog.NewRecord(time.Now(), ev.level, ev.message, 0)
 	r.AddAttrs(attrs...)
-	_ = l.sec.Handler().Handle(ctx, r)
+	return l.sec.Handler().Handle(ctx, r)
 }

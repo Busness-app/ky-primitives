@@ -334,3 +334,30 @@ func TestATamperedShippedLineFailsVerification(t *testing.T) {
 		t.Errorf("tampered stream error = %v, want auditchain.ErrBrokenChain", err)
 	}
 }
+
+// failingWriter is a sink the collector has stopped draining.
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("pipe closed") }
+
+// A dropped audit line is indistinguishable from tampering at central verification, so
+// the write failure has to reach the caller rather than the floor.
+//
+// Written first against the discarded handler error, where Audit had nothing to return.
+func TestAuditReturnsTheWriteError(t *testing.T) {
+	lg, err := New(Config{App: "test", Out: failingWriter{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain, err := auditchain.New(testKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := chain.Append(context.Background(), func(auditchain.Record, auditchain.Anchor) error { return nil }, AuditFields(UserID("u_1"))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lg.Audit(context.Background(), ShareRedeemed, rec, UserID("u_1")); err == nil {
+		t.Fatal("Audit reported success for a line the writer refused")
+	}
+}

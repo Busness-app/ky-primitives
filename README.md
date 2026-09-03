@@ -326,7 +326,9 @@ against `actor` against `actorId`, and one with positional arguments and no name
 ```go
 lg, err := logging.New(logging.Config{App: "kypassword", Out: os.Stderr})
 lg.Security(ctx, logging.AuthFailed, logging.UserID(id), logging.RemoteIP(ip))
-lg.Audit(ctx, logging.ShareRedeemed, rec, logging.UserID(id))
+if err := lg.Audit(ctx, logging.ShareRedeemed, rec, logging.UserID(id)); err != nil {
+	// The shipped copy did not land; the local chained file still has it.
+}
 ```
 
 `lg.Handler()` is a `slog.Handler` for products mid-migration. Install it with
