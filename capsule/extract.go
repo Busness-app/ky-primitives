@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -162,8 +164,36 @@ func extractPayload(payload []byte, targetDir string) ([]File, []FileEntry, erro
 		}
 	}
 
+	// The list is decoded from the payload, not derived from it, so until this point it
+	// can say anything: a path no member has, a digest for bytes that were not extracted,
+	// more entries than the file cap. Callers verify restores per-file against it, and the
+	// FileEntry doc promises them the normalised path and clamped mode extraction
+	// produced. TestFileListMustDescribeTheExtractedMembers holds that.
+	if haveList {
+		if err := reconcileFileList(entries, files); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	ok = true
 	return files, entries, nil
+}
+
+// reconcileFileList refuses a decoded list that does not describe the extracted files
+// exactly: one entry per file, in extraction order, every field equal. Seal writes the
+// list in member order from the same normalisation, so a capsule it sealed always passes.
+func reconcileFileList(entries []FileEntry, files []File) error {
+	if len(entries) != len(files) {
+		return fmt.Errorf("%w: file list has %d entries for %d members", ErrCorruptCapsule, len(entries), len(files))
+	}
+	for i, f := range files {
+		sum := sha256.Sum256(f.Content)
+		want := FileEntry{Path: f.Path, Size: int64(len(f.Content)), Sum: hex.EncodeToString(sum[:]), Mode: f.Mode}
+		if entries[i] != want {
+			return fmt.Errorf("%w: file list entry %d is %+v, member is %+v", ErrCorruptCapsule, i, entries[i], want)
+		}
+	}
+	return nil
 }
 
 // readFileList decodes the reserved member. The bound is the one the list had as a

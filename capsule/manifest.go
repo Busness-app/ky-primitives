@@ -15,8 +15,9 @@ import (
 //
 // Path and Mode are the normalised ones — the relative path extraction writes and the
 // owner-only clamp it applies — not the caller's spelling of them, so an entry can be
-// matched against the File values Open returns.
-// TestManifestEntriesDescribeWhatExtractionProduces holds that.
+// matched against the File values Open returns. Seal builds them that way
+// (TestManifestEntriesDescribeWhatExtractionProduces), and Open refuses a list that
+// disagrees with what it extracted (TestFileListMustDescribeTheExtractedMembers).
 type FileEntry struct {
 	Path string      `json:"path"`
 	Size int64       `json:"size_bytes"`

@@ -225,3 +225,55 @@ func FuzzSafeRelPathCannotProduceTheReservedName(f *testing.F) {
 		}
 	})
 }
+
+// The list is decoded from the payload, not derived from it, so whoever holds the key can
+// write one that describes nothing extraction produced: a path no member has, a digest
+// for bytes that were never extracted, or more entries than members. Callers verify
+// restores per-file against these entries, so every field is checked against the member.
+//
+// Written first against the unreconciled read path, where every hostile case passed.
+func TestFileListMustDescribeTheExtractedMembers(t *testing.T) {
+	// sha256("a"), computed independently of this package.
+	const sumA = "ca978112ca1bbdcafac231b39a23dc4da786eff8147c4e72b9807785afee48bb"
+	member := &tar.Header{Name: "a.txt", Mode: 0600, Size: 1, Typeflag: tar.TypeReg}
+	honest := `{"path":"a.txt","size_bytes":1,"sha256":"` + sumA + `","mode":384}`
+
+	cases := []struct {
+		name    string
+		list    string
+		wantErr error
+	}{
+		{"matches the member", `[` + honest + `]`, nil},
+		{"names a path no member has", `[{"path":"../../etc/shadow","size_bytes":1,"sha256":"` + sumA + `","mode":384}]`, ErrCorruptCapsule},
+		{"digest disagrees with the member", `[{"path":"a.txt","size_bytes":1,"sha256":"` + sumA[:63] + `0","mode":384}]`, ErrCorruptCapsule},
+		{"size disagrees with the member", `[{"path":"a.txt","size_bytes":2,"sha256":"` + sumA + `","mode":384}]`, ErrCorruptCapsule},
+		{"mode is not the clamped one", `[{"path":"a.txt","size_bytes":1,"sha256":"` + sumA + `","mode":420}]`, ErrCorruptCapsule},
+		{"has an entry too many", `[` + honest + `,` + honest + `]`, ErrCorruptCapsule},
+		{"has an entry too few", `[]`, ErrCorruptCapsule},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			list := []byte(tc.list)
+			payload := hostilePayload(t,
+				[]*tar.Header{
+					member,
+					{Name: reservedFileList, Mode: 0600, Size: int64(len(list)), Typeflag: tar.TypeReg},
+				},
+				[][]byte{[]byte("a"), list})
+
+			_, entries, err := extractPayload(payload, "")
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("got %v, want %v", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 || entries[0].Path != "a.txt" {
+				t.Fatalf("entries = %+v", entries)
+			}
+		})
+	}
+}
