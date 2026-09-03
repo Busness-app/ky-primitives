@@ -30,6 +30,26 @@ the day it lands.
 | Scaffold first, then re-fork gridlock | `ky_server_base` migrates fully; gridlock is reconciled back to it rather than migrated independently. |
 | Close every library API gap before migrating | Phase 1 is library work. Products adopt a library that fits them. |
 | `auditchain` is migration-only | Goes to kybookmarks, kypassword and kyrecovery. The other five keep flat tables. |
+| Each product seals and restores its own capsule (2026-09-03) | kyrecovery stores ciphertext, reads `UnverifiedManifest` for display, and attests only "unchanged since deposit". It never holds a `Manifest`, a key, or another product's plaintext. Phase 5 becomes a deletion of `internal/capsule` and `internal/adapter`, plus a keyless streaming `Inspect`. |
+| Kyrecovery coordinates the share ceremony blind (2026-09-03) | Products split the key. Custodians hold shares. At recovery the fresh product instance pairs with kyrecovery and publishes an ephemeral public key; custodians submit shares encrypted to it and kyrecovery relays opaque blobs. Kyrecovery may hold exactly one share as a custodian, never more; threshold is at least 2. Rejected: kyrecovery running the ceremony and seeing the key, even transiently. |
+
+### One suite-wide recovery keypair (decided 2026-09-03)
+
+`Seal` mints a fresh key per capsule. Shares per capsule would mean a ceremony per backup,
+so instead the suite has one long-lived recovery keypair. Kyrecovery generates it in a
+one-time ceremony, splits the 32-byte seed into custodian shares, shows the cards, and
+zeroes the seed without persisting it — the single, recorded exception to "kyrecovery never
+holds the key". Each app receives the public key at pairing over the authenticated channel
+and stores only that; kyrecovery pins the key ID it handed out and refuses deposits sealed
+to any other. Sealing needs no secret and the ceremony runs once. k custodians can open
+every product's backups; the custodians are the same people, so that is accepted and noted.
+Rejected: per-capsule shares; per-product keypairs (N ceremonies for no separation anyone
+would use); any product holding the private key.
+
+Consequences for the library: `capsule` seals to a public key with `crypto/hpke` (Go 1.26
+stdlib) using the X-Wing hybrid KEM, and the encapsulated key and key ID ride in the
+authenticated manifest of both containers. A `recoverykey` package owns the keypair and
+the split. Designed in `2026-09-03-recovery-keypair-design.md`, ahead of Plan 2.
 
 ### Nothing is in the wild
 
