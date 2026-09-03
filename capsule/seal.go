@@ -33,6 +33,9 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 	if len(files) == 0 {
 		return nil, Manifest{}, fmt.Errorf("refusing to seal a capsule with no files")
 	}
+	if to.IsZero() {
+		return nil, Manifest{}, fmt.Errorf("capsule: %w", recoverykey.ErrUninitializedKey)
+	}
 	// The same invariant shamir.Split enforces. A capsule states its recovery topology in
 	// the manifest, and a capsule advertising 5-of-3 — or 0-of-3, which reads as "no
 	// shares needed" — sends a custodian looking for a kit that was never issuable.

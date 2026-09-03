@@ -163,3 +163,18 @@ func TestKycap2IsRefusedAsUnknown(t *testing.T) {
 		t.Fatalf("got %v, want ErrUnknownContainer", err)
 	}
 }
+
+// A zero-value key is a caller bug. It must be an error, not a panic and not a capsule
+// nobody can open.
+func TestZeroValueKeysAreErrors(t *testing.T) {
+	priv := testRecoveryKey(t)
+	raw := sealOne(t, priv.Public())
+	if _, _, err := capsule.Open(raw, recoverykey.PrivateKey{}, ""); !errors.Is(err, recoverykey.ErrUninitializedKey) {
+		t.Fatalf("Open with a zero key gave %v, want ErrUninitializedKey", err)
+	}
+	_, _, err := capsule.Seal("fixture", "0.0.0",
+		[]capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}, nil, nil, 2, 3, recoverykey.PublicKey{})
+	if !errors.Is(err, recoverykey.ErrUninitializedKey) {
+		t.Fatalf("Seal to a zero key gave %v, want ErrUninitializedKey", err)
+	}
+}

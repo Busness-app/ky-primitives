@@ -126,3 +126,25 @@ func TestAccessorsReturnCopies(t *testing.T) {
 		t.Fatal("Bytes() returned the internal buffer")
 	}
 }
+
+func TestZeroValueKeysAreRefusedNotSplit(t *testing.T) {
+	var priv recoverykey.PrivateKey
+	var pub recoverykey.PublicKey
+	if !priv.IsZero() || !pub.IsZero() {
+		t.Fatal("zero values report IsZero() == false")
+	}
+	if _, err := recoverykey.Split(priv, 2, 3); !errors.Is(err, recoverykey.ErrUninitializedKey) {
+		t.Fatalf("Split of a zero key gave %v, want ErrUninitializedKey", err)
+	}
+	// Accessors on a zero value must not panic.
+	if priv.Public().ID() != "" || pub.ID() != "" || pub.Bytes() != nil || priv.HPKE() != nil || pub.HPKE() != nil {
+		t.Fatal("zero-value accessors returned non-empty results")
+	}
+	k, err := recoverykey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if k.IsZero() || k.Public().IsZero() {
+		t.Fatal("a generated key reports IsZero() == true")
+	}
+}

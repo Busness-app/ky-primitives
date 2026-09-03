@@ -104,6 +104,10 @@ func decryptPayload(raw []byte, with recoverykey.PrivateKey) (manifest, []byte, 
 		return manifest{}, nil, fmt.Errorf("%w: unreadable manifest: %v", ErrCorruptCapsule, err)
 	}
 
+	if with.IsZero() {
+		return manifest{}, nil, fmt.Errorf("capsule: %w", recoverykey.ErrUninitializedKey)
+	}
+
 	// Before any decapsulation. The manifest is not yet authenticated here, so this is a
 	// courtesy to the operator holding the wrong kit, not a security check — the AEAD below
 	// is the security check, and a forged ID that matches the wrong key still fails there.

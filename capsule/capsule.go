@@ -7,10 +7,11 @@
 // the AEAD's additional authenticated data, so every field describing the capsule is
 // authenticated rather than merely present.
 //
-// Two containers came before it and both are retired: kysignon-server's kycap/1 and
+// Three containers came before it and all are retired: kysignon-server's kycap/1 and
 // kyrecovery-server's tar, which authenticated their ciphertext and left the manifest
 // outside the AEAD, so the recovery topology a capsule advertises could be rewritten by
-// anyone who could reach the file. kycap/2 fixed that and still handed back a raw key.
+// anyone who could reach the file; and kycap/2, which fixed that and still handed back a
+// raw key.
 //
 // The payload is a gzipped tar of the backed-up files, extracted through the hardening in
 // extract.go.
@@ -70,9 +71,7 @@ func Open(raw []byte, with recoverykey.PrivateKey, targetDir string) (Manifest, 
 		return Manifest{}, nil, err
 	}
 	// The file list is inside the payload, so it is read only after decryptPayload has
-	// authenticated the container and verified the payload hash. A capsule sealed before
-	// v0.3.0 carries no such member and reports no files; its payload hash still covers
-	// every byte of it.
+	// authenticated the container and verified the payload hash.
 	files, entries, err := extractPayload(payload, targetDir)
 	if err != nil {
 		return Manifest{}, nil, err

@@ -312,15 +312,18 @@ halves, and both are used.
    Consecutive indices are forbidden in this test — they make every Lagrange coefficient
    1 and pass in any field, which is how the 0x11d/0x11b split hid.
 10. `FromSeed` refuses 31 and 33 bytes; `ParsePublicKey` refuses 1215 and 1217.
-11. `keyfile.Store` writes owner-only, the file is fsynced, and a second `Store` to the
+11. `keyfile.Store` writes owner-only, the write path calls fsync (not asserted; nothing
+    reasonably can), and a second `Store` to the
     same path fails with `fs.ErrExist` and leaves the first key's bytes intact.
 12. `TestModuleDependenciesAreAllowlisted` and `TestOnlyPasswordImportsADependency` pass
     with no changes. Everything here is standard library.
 13. A `kycap/2` container from the existing fixtures fails `Open` with
     `ErrUnknownContainer`, not a decrypt error and not a panic.
 
-**Fuzz.** The existing container fuzz target is unchanged; the manifest parser gained two
-string fields and nothing else.
+**Fuzz.** The existing container fuzz target now derives its key from the committed fixture
+seed rather than a fresh `Generate()`, so the seed corpus capsule and every mutation that
+preserves `recovery_key_id` walk the whole decrypt path instead of stopping at the key-ID
+compare.
 
 ---
 

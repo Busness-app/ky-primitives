@@ -34,10 +34,22 @@ func TestNonConsecutiveSharesRebuildTheKey(t *testing.T) {
 
 // Shares from two different splits must be refused, not combined into a plausible key.
 func TestSharesFromTwoSplitsAreRefused(t *testing.T) {
-	a, _ := recoverykey.Generate()
-	b, _ := recoverykey.Generate()
-	sa, _ := recoverykey.Split(a, 2, 3)
-	sb, _ := recoverykey.Split(b, 2, 3)
+	a, err := recoverykey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := recoverykey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sa, err := recoverykey.Split(a, 2, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sb, err := recoverykey.Split(b, 2, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := recoverykey.Combine([]shamir.Share{sa[0], sb[2]}); !errors.Is(err, shamir.ErrShareSet) {
 		t.Fatalf("got %v, want ErrShareSet", err)
 	}
@@ -55,7 +67,10 @@ func TestCombineRefusesASecretThatIsNotASeed(t *testing.T) {
 }
 
 func TestSplitRefusesAnImpossibleKit(t *testing.T) {
-	k, _ := recoverykey.Generate()
+	k, err := recoverykey.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := recoverykey.Split(k, 1, 3); err == nil {
 		t.Fatal("Split accepted threshold 1")
 	}

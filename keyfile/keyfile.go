@@ -258,7 +258,8 @@ func write(path string, key []byte, enc Encoding) error {
 		return fmt.Errorf("keyfile: %w", err)
 	}
 	tmpName := tmp.Name()
-	// Removed on every failure path below; a no-op once the rename has consumed it.
+	// Removed on every failure path below, and after a successful link, which leaves the
+	// temporary name in place.
 	defer func() {
 		tmp.Close()
 		os.Remove(tmpName)

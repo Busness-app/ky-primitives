@@ -1,7 +1,9 @@
 package capsule
 
 import (
+	"encoding/hex"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/Busness-app/ky-primitives/recoverykey"
@@ -19,7 +21,19 @@ func FuzzOpenNeverPanics(f *testing.F) {
 	f.Add([]byte(`{"format":"kycap/1","manifest":{},"ciphertext":"AAAA"}`))
 	f.Add([]byte{})
 
-	priv, err := recoverykey.Generate()
+	// The fixture's key, not a random one: the seed corpus capsule was sealed to it, so it
+	// and every mutation that preserves recovery_key_id walk the whole decrypt path —
+	// decapsulation, the AEAD, the payload hash, extraction. A random key would stop every
+	// input at the key-ID compare and fuzz only the JSON parser.
+	seedHex, err := os.ReadFile("../testdata/capsules/kycap3.seed")
+	if err != nil {
+		f.Fatal(err)
+	}
+	seed, err := hex.DecodeString(strings.TrimSpace(string(seedHex)))
+	if err != nil {
+		f.Fatal(err)
+	}
+	priv, err := recoverykey.FromSeed(seed)
 	if err != nil {
 		f.Fatal(err)
 	}

@@ -34,11 +34,12 @@ var (
 	ErrSeedLength = errors.New("recoverykey: seed must be exactly 32 bytes")
 	// ErrPublicKeyLength reports public key bytes that are not exactly PublicKeyBytes long.
 	ErrPublicKeyLength = errors.New("recoverykey: public key must be exactly 1216 bytes")
+	// ErrUninitializedKey reports a zero-value PrivateKey or PublicKey used as if it were real.
+	ErrUninitializedKey = errors.New("recoverykey: zero-value key; use Generate, FromSeed or ParsePublicKey")
 )
 
-// KEM is the one key encapsulation this package uses. Exported so a test can name it; there
-// is no other reason to call it.
-func KEM() hpke.KEM { return hpke.MLKEM768X25519() }
+// kem is the one key encapsulation this package uses.
+func kem() hpke.KEM { return hpke.MLKEM768X25519() }
 
 // PrivateKey is the recovery private key. It exists in memory during the ceremony that
 // splits it and during a restore that combines it, and nowhere else.
@@ -54,7 +55,7 @@ type PublicKey struct {
 
 // Generate makes a fresh keypair.
 func Generate() (PrivateKey, error) {
-	k, err := KEM().GenerateKey()
+	k, err := kem().GenerateKey()
 	if err != nil {
 		return PrivateKey{}, fmt.Errorf("recoverykey: %w", err)
 	}
@@ -72,7 +73,7 @@ func FromSeed(seed []byte) (PrivateKey, error) {
 	if len(seed) != SeedBytes {
 		return PrivateKey{}, fmt.Errorf("%w: got %d", ErrSeedLength, len(seed))
 	}
-	k, err := KEM().NewPrivateKey(seed)
+	k, err := kem().NewPrivateKey(seed)
 	if err != nil {
 		return PrivateKey{}, fmt.Errorf("recoverykey: %w", err)
 	}
@@ -87,7 +88,7 @@ func ParsePublicKey(b []byte) (PublicKey, error) {
 	if len(b) != PublicKeyBytes {
 		return PublicKey{}, fmt.Errorf("%w: got %d", ErrPublicKeyLength, len(b))
 	}
-	k, err := KEM().NewPublicKey(b)
+	k, err := kem().NewPublicKey(b)
 	if err != nil {
 		return PublicKey{}, fmt.Errorf("recoverykey: %w", err)
 	}
@@ -98,22 +99,46 @@ func ParsePublicKey(b []byte) (PublicKey, error) {
 // about this key is ever split.
 func (k PrivateKey) Seed() []byte { return bytes.Clone(k.seed[:]) }
 
-// Public returns the matching public key.
-func (k PrivateKey) Public() PublicKey { return PublicKey{key: k.key.PublicKey()} }
+// Public returns the matching public key, or the zero PublicKey if k is zero.
+func (k PrivateKey) Public() PublicKey {
+	if k.IsZero() {
+		return PublicKey{}
+	}
+	return PublicKey{key: k.key.PublicKey()}
+}
 
 // HPKE exposes the underlying key for capsule.Open. It is the same value crypto/hpke
-// returned; nothing here is more secret than the PrivateKey already was.
+// returned; nothing here is more secret than the PrivateKey already was. It returns nil
+// if k is zero.
 func (k PrivateKey) HPKE() hpke.PrivateKey { return k.key }
 
-// Bytes returns a copy of the 1216-byte encoding, what keyfile.Store persists.
-func (p PublicKey) Bytes() []byte { return bytes.Clone(p.key.Bytes()) }
+// IsZero reports whether k is the zero value, holding no key. Every constructor
+// (Generate, FromSeed, Combine) produces a non-zero PrivateKey.
+func (k PrivateKey) IsZero() bool { return k.key == nil }
+
+// Bytes returns a copy of the 1216-byte encoding, what keyfile.Store persists, or nil if
+// p is zero.
+func (p PublicKey) Bytes() []byte {
+	if p.IsZero() {
+		return nil
+	}
+	return bytes.Clone(p.key.Bytes())
+}
 
 // ID is the lowercase hex SHA-256 of Bytes. It is what a capsule names, what kyrecovery
-// pins, and what a custodian writes on a card.
+// pins, and what a custodian writes on a card. It returns "" if p is zero.
 func (p PublicKey) ID() string {
-	sum := sha256.Sum256(p.key.Bytes())
+	b := p.Bytes()
+	if b == nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
 
-// HPKE exposes the underlying key for capsule.Seal.
+// HPKE exposes the underlying key for capsule.Seal. It returns nil if p is zero.
 func (p PublicKey) HPKE() hpke.PublicKey { return p.key }
+
+// IsZero reports whether p is the zero value, holding no key. Every constructor
+// (Generate, ParsePublicKey, PrivateKey.Public) produces a non-zero PublicKey.
+func (p PublicKey) IsZero() bool { return p.key == nil }

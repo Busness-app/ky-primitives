@@ -6,8 +6,12 @@ import "github.com/Busness-app/ky-primitives/shamir"
 // rebuild it. It is thin over shamir.Split, and exists so that the thing being split is the
 // seed by construction: splitting the wrong 32 bytes would fail at restore through the
 // capsule's key ID check, and "fails at restore" is the failure this package exists to move
-// earlier.
+// earlier. A zero-value key would otherwise split thirty-two zero bytes into perfectly
+// printable custodian cards that open nothing.
 func Split(k PrivateKey, threshold, total int) ([]shamir.Share, error) {
+	if k.IsZero() {
+		return nil, ErrUninitializedKey
+	}
 	return shamir.Split(k.Seed(), threshold, total)
 }
 
