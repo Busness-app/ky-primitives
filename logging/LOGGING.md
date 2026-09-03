@@ -43,6 +43,10 @@ name. That does not close every channel:
 `info`. Go's `slog.Level.UnmarshalText` also accepts a numeric offset such as `error-4`, so
 that parses too. Anything else is a startup error, not a silent fallback.
 
+`Audit` ignores this knob. A record dropped for verbosity leaves a gap in the chain that
+central verification cannot tell apart from tampering, so every audit line ships
+regardless of `KY_LOG_LEVEL`. `Log` and `Security` are the only calls it filters.
+
 ## Severity and facility
 
 Every line carries an RFC 5424 `severity` and `facility`. Ordinary lines are facility 16

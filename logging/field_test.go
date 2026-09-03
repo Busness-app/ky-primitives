@@ -199,3 +199,24 @@ func TestErrBoundsUnwrapLoopOnCyclicChain(t *testing.T) {
 		t.Fatal("Err() hung on cyclic error chain")
 	}
 }
+
+// nilBranchJoinErr is a hand-written multi-error whose Unwrap() []error returns a nil
+// element. errors.Join and fmt.Errorf's multi-%w never produce this shape, but errors.Is
+// and errors.As both tolerate it from a caller's own type, and unwrapKind walks the same
+// interface they do.
+type nilBranchJoinErr struct{}
+
+func (nilBranchJoinErr) Error() string   { return "nil branch join" }
+func (nilBranchJoinErr) Unwrap() []error { return []error{context.Canceled, nil} }
+
+func TestErrToleratesANilJoinBranch(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("Err panicked on a nil join branch: %v", r)
+		}
+	}()
+	got := Err(nilBranchJoinErr{})
+	if got.key != "error_kind" {
+		t.Errorf("key = %q, want error_kind", got.key)
+	}
+}

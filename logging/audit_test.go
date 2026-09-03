@@ -181,6 +181,33 @@ func TestAuditBypassesTheLevelGate(t *testing.T) {
 	}
 }
 
+// TestAuditToleratesANilContext pins a regression from the level-gate fix: Log and
+// Security go through slog.Logger.LogAttrs, which normalises a nil context to
+// context.Background() before it reaches requestIDFrom. Audit calls the handler
+// directly and must do the same normalisation itself, or a nil context (a caller bug,
+// but one Log and Security have always tolerated) panics in exactly the path this wave
+// hardened against dropping a line.
+func TestAuditToleratesANilContext(t *testing.T) {
+	lg, buf := newTestLogger(t, slog.LevelInfo)
+
+	chain, err := auditchain.New(testKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := AuditFields(UserID("u_1"))
+	rec, err := chain.Append(context.Background(), func(auditchain.Record, auditchain.Anchor) error { return nil }, fields...)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lg.Audit(nil, ShareRedeemed, rec, UserID("u_1")) //nolint:staticcheck // exercising nil-context tolerance deliberately
+
+	m := oneLine(t, buf)
+	if m["event"] != "share_redeemed" {
+		t.Errorf("event = %v, want share_redeemed", m["event"])
+	}
+}
+
 func TestShippedLinesVerifyAsAChainAtWarnLevelWithInfoAuditEvents(t *testing.T) {
 	// Reproduces the reviewer's finding directly: a logger built at Warn, fed a mix of
 	// Info- and Warn-level audit events, must still ship every line — otherwise

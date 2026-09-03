@@ -83,12 +83,12 @@ func (l *Logger) Handler() slog.Handler { return l.ops.Handler() }
 
 // Log records an ordinary event.
 func (l *Logger) Log(ctx context.Context, ev Event, fs ...Field) {
-	l.emit(ctx, l.ops, ev, nil, fs)
+	l.emit(ctx, l.ops, ev, fs)
 }
 
 // Security records an event on the authpriv facility.
 func (l *Logger) Security(ctx context.Context, ev Event, fs ...Field) {
-	l.emit(ctx, l.sec, ev, nil, fs)
+	l.emit(ctx, l.sec, ev, fs)
 }
 
 // buildAttrs assembles one line's attributes: the event, then extra (attributes only this
@@ -107,9 +107,11 @@ func buildAttrs(ev Event, extra []slog.Attr, fs []Field) []slog.Attr {
 	return attrs
 }
 
-// emit is the one path to an ordinary line, level-gated by LogAttrs.
-func (l *Logger) emit(ctx context.Context, to *slog.Logger, ev Event, extra []slog.Attr, fs []Field) {
-	to.LogAttrs(ctx, ev.level, ev.message, buildAttrs(ev, extra, fs)...)
+// emit is the one path to an ordinary line, level-gated by LogAttrs. Audit does not go
+// through here — it calls buildAttrs directly, since it needs the extra audit attribute
+// buildAttrs takes and Log/Security never do.
+func (l *Logger) emit(ctx context.Context, to *slog.Logger, ev Event, fs []Field) {
+	to.LogAttrs(ctx, ev.level, ev.message, buildAttrs(ev, nil, fs)...)
 }
 
 type requestIDKey struct{}

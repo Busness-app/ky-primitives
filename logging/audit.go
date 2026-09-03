@@ -95,6 +95,12 @@ func renderValue(v slog.Value) string {
 // tamper-evident chain that exists only on a machine the attacker may also own is not
 // evidence. This ships a copy; the product keeps writing its local chained file.
 func (l *Logger) Audit(ctx context.Context, ev Event, rec auditchain.Record, fs ...Field) {
+	if ctx == nil {
+		// LogAttrs does this for Log and Security; Handle does not, and this bypasses
+		// LogAttrs. A nil context is a caller bug, but Audit is the one path this wave
+		// hardened against dropping a line, so it does not get to crash on it either.
+		ctx = context.Background()
+	}
 	mismatch := len(fs) > 0 && !slices.Equal(AuditFields(fs...), rec.Fields)
 	av := auditValue{rec: rec, mismatch: mismatch}
 	if mismatch {

@@ -259,9 +259,10 @@ cannot construct. Raw slog cannot forge an audit record into the stream.
 
 Applied to every string value before it can reach a line:
 
-- Control characters (`< 0x20`, and `0x7f`) are replaced with U+FFFD. This is what makes
-  log injection impossible, and it is applied to the value, not to the line, so it cannot
-  be skipped by a later renderer.
+- Control characters (`< 0x20`, `0x7f`, and the C1 range `0x80`-`0x9f`) are replaced with
+  U+FFFD. This is what makes log injection impossible, and it is applied to the value, not
+  to the line, so it cannot be skipped by a later renderer — nor by the fact that a JSON
+  string encoder does not escape C1 on its own.
 - Values cap at 256 bytes, truncated on a rune boundary with a trailing `…`, and the line
   carries a reserved `truncated_fields` count. The cap bounds the blast radius of any
   single field and keeps a line from growing without limit. The count is a number rather

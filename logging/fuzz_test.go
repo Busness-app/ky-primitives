@@ -67,8 +67,11 @@ func checkLine(t *testing.T, out string) map[string]any {
 	body := strings.TrimSuffix(out, "\n")
 	for _, r := range body {
 		// sanitize is what keeps a raw control character off the line; this loop is
-		// the one place that would notice if it ever stopped.
-		if r < 0x20 || r == 0x7f {
+		// the one place that would notice if it ever stopped. The C1 range (0x80-0x9F)
+		// is in here alongside C0 and DEL because slog's JSON string encoder does not
+		// escape it — a regression in sanitize's C1 handling would otherwise put a raw
+		// C1 byte on the line with nothing here to catch it.
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 			t.Fatalf("a raw control character reached the line: %q", body)
 		}
 	}

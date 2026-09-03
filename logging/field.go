@@ -227,6 +227,12 @@ func Err(err error) Field {
 // walk — every branch of every join draws from the same pool — so it bounds the total work
 // rather than resetting per branch.
 func unwrapKind(err error, budget *int) string {
+	if err == nil {
+		// errors.Join and fmt.Errorf never produce a nil branch, but errors.Is and
+		// errors.As tolerate one from a hand-written Unwrap() []error, and this walks
+		// the same shape they do.
+		return ""
+	}
 	for *budget > 0 {
 		*budget--
 		if joined, ok := err.(interface{ Unwrap() []error }); ok {
