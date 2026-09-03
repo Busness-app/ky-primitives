@@ -38,7 +38,7 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 		return nil, nil, Manifest{}, fmt.Errorf("capsule: %d-of-%d is not a recoverable kit; need 2 <= threshold <= total <= 255", threshold, totalShares)
 	}
 
-	payload, err := buildPayload(files)
+	payload, entries, err := buildPayload(files)
 	if err != nil {
 		return nil, nil, Manifest{}, err
 	}
@@ -58,17 +58,6 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 	}
 
 	sum := sha256.Sum256(payload)
-
-	entries := make([]FileEntry, 0, len(files))
-	for _, f := range files {
-		fsum := sha256.Sum256(f.Content)
-		entries = append(entries, FileEntry{
-			Path: f.Path,
-			Size: int64(len(f.Content)),
-			Sum:  hex.EncodeToString(fsum[:]),
-			Mode: f.Mode,
-		})
-	}
 
 	now := time.Now().UTC()
 	sealedManifest := manifest{
@@ -92,6 +81,15 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 	if err != nil {
 		return nil, nil, Manifest{}, err
 	}
+	// The last limit Open enforces that sealing can reach. Files is the only manifest
+	// component that grows with caller input, and nothing bounds a path's length, so
+	// enough long-named members push the manifest past what parseContainer accepts. Seal
+	// used to return a key for that container and every later read of it failed with
+	// ErrCorruptCapsule — a backup that cannot be restored, found at restore time.
+	// TestSealRefusesWhatOpenWouldRefuse holds this.
+	if len(manifestBytes) > maxManifestBytes {
+		return nil, nil, Manifest{}, fmt.Errorf("%w: manifest is %d bytes, Open permits %d", ErrCapsuleTooLarge, len(manifestBytes), maxManifestBytes)
+	}
 
 	sealed := gcm.Seal(nonce, nonce, payload, manifestBytes)
 
@@ -109,18 +107,24 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 	return raw, key, Manifest{UnverifiedManifest: sealedManifest}, nil
 }
 
-// buildPayload writes the files as a gzipped tar, the plaintext both containers hold.
+// buildPayload writes the files as a gzipped tar, the plaintext both containers hold, and
+// the manifest entries describing it.
 //
-// Every limit Open enforces is enforced here too. Sealing is the only place the failure
-// is cheap: a capsule that Open refuses is a backup that cannot be restored, and it was
-// previously reachable by sealing one file past the limit, or two paths that normalise to
-// one destination.
-func buildPayload(files []File) ([]byte, error) {
+// Every limit Open enforces is enforced here too, bar the manifest bound Seal applies to
+// the encoded bytes. Sealing is the only place the failure is cheap: a capsule that Open
+// refuses is a backup that cannot be restored, and it was previously reachable by sealing
+// one file past the limit, or two paths that normalise to one destination.
+//
+// The entries are built here, from the normalised name and clamped mode this writes, so
+// the manifest describes the members a restore actually produces rather than the caller's
+// spelling of them. Built anywhere else they are a second normalisation to keep in step.
+func buildPayload(files []File) ([]byte, []FileEntry, error) {
 	if len(files) > maxCapsuleFiles {
-		return nil, fmt.Errorf("%w: %d files, Open permits %d", ErrCapsuleTooLarge, len(files), maxCapsuleFiles)
+		return nil, nil, fmt.Errorf("%w: %d files, Open permits %d", ErrCapsuleTooLarge, len(files), maxCapsuleFiles)
 	}
 	var total int64
 	seen := make(map[string]struct{}, len(files))
+	entries := make([]FileEntry, 0, len(files))
 
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
@@ -131,20 +135,20 @@ func buildPayload(files []File) ([]byte, error) {
 		// can never be one this package refuses to extract.
 		name, err := safeRelPath(f.Path)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if _, dup := seen[name]; dup {
-			return nil, fmt.Errorf("%w: %q", ErrDuplicatePath, name)
+			return nil, nil, fmt.Errorf("%w: %q", ErrDuplicatePath, name)
 		}
 		seen[name] = struct{}{}
 
 		size := int64(len(f.Content))
 		if size > maxCapsuleFileBytes {
-			return nil, fmt.Errorf("%w: %q is %d bytes, Open permits %d", ErrCapsuleTooLarge, name, size, maxCapsuleFileBytes)
+			return nil, nil, fmt.Errorf("%w: %q is %d bytes, Open permits %d", ErrCapsuleTooLarge, name, size, maxCapsuleFileBytes)
 		}
 		total += size
 		if total > maxCapsuleExpandedTotal {
-			return nil, fmt.Errorf("%w: payload exceeds %d bytes", ErrCapsuleTooLarge, maxCapsuleExpandedTotal)
+			return nil, nil, fmt.Errorf("%w: payload exceeds %d bytes", ErrCapsuleTooLarge, maxCapsuleExpandedTotal)
 		}
 		mode := f.Mode.Perm() & 0700
 		if mode == 0 {
@@ -158,18 +162,26 @@ func buildPayload(files []File) ([]byte, error) {
 			ModTime:  time.Now().UTC(),
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if _, err := tw.Write(f.Content); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+
+		fsum := sha256.Sum256(f.Content)
+		entries = append(entries, FileEntry{
+			Path: name,
+			Size: size,
+			Sum:  hex.EncodeToString(fsum[:]),
+			Mode: mode,
+		})
 	}
 
 	if err := tw.Close(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := gw.Close(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return buf.Bytes(), nil
+	return buf.Bytes(), entries, nil
 }

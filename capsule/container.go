@@ -70,6 +70,9 @@ func parseContainer(raw []byte) (kycapFile, error) {
 	if cf.Format != KycapFileFormat {
 		return kycapFile{}, fmt.Errorf("%w: unsupported capsule format %q", ErrUnknownContainer, cf.Format)
 	}
+	if cf.Ciphertext == "" {
+		return kycapFile{}, fmt.Errorf("%w: container carries no ciphertext", ErrCorruptCapsule)
+	}
 	if err := checkContainerSize("encoded ciphertext", len(cf.Ciphertext)); err != nil {
 		return kycapFile{}, err
 	}
@@ -85,9 +88,6 @@ func decryptPayload(raw, key []byte) (manifest, []byte, error) {
 	cf, err := parseContainer(raw)
 	if err != nil {
 		return manifest{}, nil, err
-	}
-	if cf.Ciphertext == "" {
-		return manifest{}, nil, fmt.Errorf("%w: container carries no ciphertext", ErrCorruptCapsule)
 	}
 	var m manifest
 	if err := json.Unmarshal(cf.Manifest, &m); err != nil {

@@ -26,6 +26,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           path: ky-primitives
+          # The Build and Test steps below run the consumer's own test code from this
+          # shared workspace. Persisting credentials would leave this job's GITHUB_TOKEN
+          # in an http.extraheader in ky-primitives/.git/config for that code to read.
+          # Nothing later in this job runs git against the remote.
+          persist-credentials: false
 
       - name: Check out ${{ matrix.consumer }}
         # A breaking change cannot be fixed in one commit across two repositories.
@@ -39,6 +44,12 @@ jobs:
           HEAD_REF: ${{ github.head_ref }}
         run: |
           set -euo pipefail
+          # Two of the three consumers are public and pair correctly over anonymous read,
+          # so an unset token is not fatal. Say why the private one is about to fail with
+          # an authentication error rather than leaving the operator to infer it.
+          if [ -z "${GH_TOKEN}" ]; then
+            echo "::warning::SUITE_READ_TOKEN is not configured; public consumers will still pair, private ones will fail to authenticate below"
+          fi
           repo="https://x-access-token:${GH_TOKEN}@github.com/Busness-app/${{ matrix.consumer }}.git"
           branch=""
           if [ -n "${HEAD_REF}" ]; then

@@ -2,6 +2,7 @@ package capsule_test
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/Busness-app/ky-primitives/capsule"
@@ -29,6 +30,33 @@ func TestReadUnverifiedManifestNeedsNoKey(t *testing.T) {
 	}
 	if got.CapsuleID == "" {
 		t.Error("CapsuleID is empty")
+	}
+}
+
+// The emptiness check lived in decryptPayload, so a container with a manifest and no
+// ciphertext parsed cleanly on the keyless path: a caller displaying only the manifest saw
+// a valid-looking capsule Open would refuse.
+func TestBothPathsRefuseACiphertextLessContainer(t *testing.T) {
+	files := []capsule.File{{Path: "db.sqlite", Content: []byte("payload"), Mode: 0o600}}
+	raw, key, _, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 3, 5)
+	if err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	var cf map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &cf); err != nil {
+		t.Fatal(err)
+	}
+	cf["ciphertext"] = json.RawMessage(`""`)
+	stripped, err := json.Marshal(cf)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := capsule.ReadUnverifiedManifest(stripped); !errors.Is(err, capsule.ErrCorruptCapsule) {
+		t.Errorf("ReadUnverifiedManifest got %v, want ErrCorruptCapsule", err)
+	}
+	if _, _, err := capsule.Open(stripped, key, ""); !errors.Is(err, capsule.ErrCorruptCapsule) {
+		t.Errorf("Open got %v, want ErrCorruptCapsule", err)
 	}
 }
 

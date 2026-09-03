@@ -142,9 +142,20 @@ func read(path string, size int, enc Encoding) ([]byte, error) {
 	if err := checkKeyInfo(fi); err != nil {
 		return nil, err
 	}
-	raw, err := io.ReadAll(f)
+	// Bounded because this is the package that loads long-lived secrets, and a corrupt or
+	// attacker-controlled file would otherwise be pulled into memory whole before any
+	// decode or size check could refuse it. The cap comes from size rather than a round
+	// number: hex is the widest of the three encodings at two characters per byte, and
+	// the slack covers a trailing newline, a CRLF, or an editor's blank last line.
+	limit := 2*size + 64
+	raw, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(raw) > limit {
+		// Left where it was found, like every other unreadable file here.
+		// TestReadRefusesAnOversizedFileWithoutTouchingIt holds that.
+		return nil, fmt.Errorf("%w: %s is larger than %d bytes", ErrUnreadable, path, limit)
 	}
 	key, err := enc.decode(raw)
 	if err != nil {

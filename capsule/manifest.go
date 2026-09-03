@@ -9,6 +9,11 @@ import (
 
 // FileEntry describes one member of the payload. The digest lets a restore say which file
 // is wrong; the payload hash only says that one of them is.
+//
+// Path and Mode are the normalised ones — the relative path extraction writes and the
+// owner-only clamp it applies — not the caller's spelling of them, so an entry can be
+// matched against the File values Open returns.
+// TestManifestEntriesDescribeWhatExtractionProduces holds that.
 type FileEntry struct {
 	Path string      `json:"path"`
 	Size int64       `json:"size_bytes"`
