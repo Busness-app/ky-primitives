@@ -284,6 +284,62 @@ mark outside the log attests to it.
 logged different things and wrote to JSON lines, a file and a database; forcing one schema
 on them is what made them diverge, and where the bytes went was never the part that broke.
 
+## logging
+
+Emits JSON lines on stderr. A collector agent ships them; this package opens no socket,
+holds no buffer and rotates no file, because an agent survives the process dying and a
+library buffer does not.
+
+The suite ran five logging architectures across nine servers. Seven of them shipped a
+`LOGGING.md` promising structured, privacy-safe output and one delivered it. Redaction
+existed in two products with opposite strategies: kynotes dropped anything outside a
+21-key allowlist, kypost redacted values whose key *name* looked sensitive — a denylist,
+which fails silently on a key nobody thought of, and which seventeen of its own call sites
+bypassed anyway.
+
+Three things here are why it is in this library rather than fixed per product.
+
+A field value cannot forge a line. Control characters become U+FFFD on the value, before
+any renderer sees it, and values cap at 256 bytes. Six products passed values into
+`log.Printf` unescaped and one passed a free-form `map[string]any` into `json.Marshal`; a
+newline in any of them writes a log line of the attacker's choosing, and a forged line is
+indistinguishable from a real one.
+
+A key must be declared. There is no `Field(name, value)`, and values are `string`,
+`int64`, `bool` or `time.Time` rather than `any`, so a struct holding a token cannot be
+logged whole.
+
+An event has one name. Four products spelled the same audit event four ways — `user_id`
+against `actor` against `actorId`, and one with positional arguments and no names at all.
+
+```go
+lg, err := logging.New(logging.Config{App: "kypassword", Out: os.Stderr})
+lg.Security(ctx, logging.AuthFailed, logging.UserID(id), logging.RemoteIP(ip))
+lg.Audit(ctx, logging.ShareRedeemed, rec, logging.UserID(id))
+```
+
+`lg.Handler()` is a `slog.Handler` for products mid-migration. Install it with
+`slog.SetDefault` and existing call sites keep working; attributes outside the vocabulary
+are dropped and counted into `dropped_fields`, so what is lost shows on the line. A
+declared key does not save an arbitrary value: `slog.Any("user_id", someStruct)` drops
+even though `user_id` is declared, because a struct or a map is `KindAny` or `KindGroup`,
+and a declared name vouches for the key, not for whatever Go value showed up under it —
+that is the first thing a migrating call site hits.
+
+Audit lines are flat and carry `seq`, `prev`, `hash` and `fields` at the top level, so
+`cmd/kyauditverify` verifies the collector's export unchanged. `Audit` recomputes the flat
+keys from the fields it is given and checks them against the record's own `Fields`; a
+disagreement is caught at emission, not assumed away by construction, and costs the flat
+keys — replaced with an `audit_fields_mismatch` marker — while the record itself, the part
+that is authenticated, ships regardless. The product keeps its own local chained file: a
+tamper-evident chain that exists only on a machine the attacker may also own is not
+evidence.
+
+There is no syslog renderer. `log/syslog` is frozen, absent on Windows and Plan 9, and
+broken on macOS 12 and later. Writing RFC 5424 to stderr instead would double-frame the
+line, because the collector already supplies a frame — so severity and facility are
+ordinary JSON fields and the frame is the agent's job.
+
 ## password
 
 Hashes and verifies passwords with Argon2id.
