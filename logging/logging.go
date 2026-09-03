@@ -60,9 +60,17 @@ func New(cfg Config) (*Logger, error) {
 	if out == nil {
 		out = os.Stderr
 	}
+	// One JSONHandler, shared by both facilities. slog.NewJSONHandler allocates its own
+	// mutex; two of them writing to the same Out would serialize against different
+	// locks and race on Out.Write the moment a product logs an ops line and a security
+	// line concurrently, which is ordinary request-handler usage.
+	inner := slog.NewJSONHandler(out, &slog.HandlerOptions{
+		Level:       cfg.Level,
+		ReplaceAttr: renameSlogKeys,
+	})
 	return &Logger{
-		ops: slog.New(newHandler(out, cfg, facilityLocal0)),
-		sec: slog.New(newHandler(out, cfg, facilityAuthpriv)),
+		ops: slog.New(&handler{inner: inner, app: cfg.App, facility: facilityLocal0}),
+		sec: slog.New(&handler{inner: inner, app: cfg.App, facility: facilityAuthpriv}),
 	}, nil
 }
 
@@ -118,14 +126,12 @@ type handler struct {
 	inner    slog.Handler
 	app      string
 	facility int64
-}
 
-func newHandler(out io.Writer, cfg Config, facility int64) *handler {
-	inner := slog.NewJSONHandler(out, &slog.HandlerOptions{
-		Level:       cfg.Level,
-		ReplaceAttr: renameSlogKeys,
-	})
-	return &handler{inner: inner, app: cfg.App, facility: facility}
+	// attrDropped and attrTruncated carry counts from attributes refused or cut at
+	// WithAttrs time (a derived logger's .With(...) call), so a line built from a
+	// derived handler still reports what it lost instead of going silent about it.
+	attrDropped   int
+	attrTruncated int
 }
 
 // renameSlogKeys puts slog's built-in keys under the suite's names, so a collector sees
@@ -152,10 +158,17 @@ func (h *handler) Enabled(ctx context.Context, l slog.Level) bool {
 func (h *handler) WithGroup(string) slog.Handler { return h }
 
 // WithAttrs filters the attributes at the point they are attached, so an undeclared key
-// cannot be smuggled in on a derived logger.
+// cannot be smuggled in on a derived logger. What it refuses is carried forward on the
+// derived handler rather than discarded, so a line built from it still counts the loss.
 func (h *handler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	kept, _, _ := h.filter(attrs)
-	return &handler{inner: h.inner.WithAttrs(kept), app: h.app, facility: h.facility}
+	kept, dropped, truncated := h.filter(attrs)
+	return &handler{
+		inner:         h.inner.WithAttrs(kept),
+		app:           h.app,
+		facility:      h.facility,
+		attrDropped:   h.attrDropped + dropped,
+		attrTruncated: h.attrTruncated + truncated,
+	}
 }
 
 // filter splits attributes into those that may appear and counts of what was refused.
@@ -192,11 +205,12 @@ func (h *handler) filter(attrs []slog.Attr) (kept []slog.Attr, dropped, truncate
 				// whether it arrived through the typed API or a raw slog call.
 				kept = append(kept, a)
 			default:
-				// KindAny and KindGroup are refused even for a declared key. A
-				// declared name only vouches for the key; it says nothing about
-				// what a caller stuffed into an arbitrary Go value, and this
-				// package's rule is that values are typed and bounded — an "any"
-				// is neither, and stringifying it would print a struct whole.
+				// KindAny, KindGroup and KindLogValuer are refused even for a
+				// declared key. A declared name only vouches for the key; it says
+				// nothing about what a caller stuffed into an arbitrary Go value
+				// (or what a LogValuer might resolve to), and this package's rule
+				// is that values are typed and bounded — none of these are, and
+				// stringifying one would print it onto the line whole.
 				dropped++
 			}
 		}
@@ -211,11 +225,24 @@ func (h *handler) Handle(ctx context.Context, r slog.Record) error {
 		return true
 	})
 	kept, dropped, truncated := h.filter(attrs)
+	dropped += h.attrDropped
+	truncated += h.attrTruncated
 
-	out := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
+	// The message is caller data on every raw slog call site Handler() exists to
+	// support, so it gets the same treatment as any string value: no control
+	// characters, capped length.
+	msg, msgCut := sanitize(r.Message)
+	if msgCut {
+		truncated++
+	}
+
+	out := slog.NewRecord(r.Time, r.Level, msg, r.PC)
 	out.AddAttrs(slog.String("app", h.app))
 	if id, ok := requestIDFrom(ctx); ok {
-		clean, _ := sanitize(id)
+		clean, idCut := sanitize(id)
+		if idCut {
+			truncated++
+		}
 		out.AddAttrs(slog.String("request_id", clean))
 	}
 	out.AddAttrs(kept...)

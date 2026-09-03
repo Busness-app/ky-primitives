@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -236,5 +237,147 @@ func TestRawAnyUnderADeclaredKeyIsDropped(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "shhh") {
 		t.Error("the struct's field survived in the line")
+	}
+}
+
+// TestConcurrentLogAndSecurityDoNotRace pins the fix for a review finding: New used to
+// build two slog.NewJSONHandlers over the same io.Writer, and each JSONHandler owns its
+// own mutex. The two streams serialized against different locks and raced on Out.Write.
+// This is ordinary usage — a request handler logging an ops line while auth middleware
+// logs a security line for the same request — so it needs no special trigger beyond
+// concurrent calls under -race.
+func TestConcurrentLogAndSecurityDoNotRace(t *testing.T) {
+	lg, _ := newTestLogger(t, slog.LevelInfo)
+	var wg sync.WaitGroup
+	for i := 0; i < 200; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			lg.Log(context.Background(), Started)
+		}()
+		go func() {
+			defer wg.Done()
+			lg.Security(context.Background(), AuthFailed)
+		}()
+	}
+	wg.Wait()
+}
+
+// TestRecordMessageIsSanitized pins the fix for a review finding: Handle passed
+// r.Message straight into the output record. On the typed API the message is always an
+// Event's constant, so this only bites a product's raw slog call sites — exactly the
+// path Handler() exists to support — where the message is arbitrary caller data.
+func TestRecordMessageIsSanitized(t *testing.T) {
+	lg, buf := newTestLogger(t, slog.LevelInfo)
+	sl := slog.New(lg.Handler())
+	sl.Info("bad\nmessage" + strings.Repeat("M", 4000))
+
+	m := oneLine(t, buf)
+	msg, ok := m["message"].(string)
+	if !ok {
+		t.Fatalf("message is not a string: %v", m["message"])
+	}
+	if strings.Contains(msg, "\n") {
+		t.Error("message still carries a raw newline")
+	}
+	if len(msg) > maxValueBytes {
+		t.Errorf("message is %d bytes, want at most %d", len(msg), maxValueBytes)
+	}
+	if m["truncated_fields"] != float64(1) {
+		t.Errorf("truncated_fields = %v, want 1 for an over-long message", m["truncated_fields"])
+	}
+}
+
+// TestWithAttrsRefusesUndeclaredAndReservedKeys pins WithAttrs, the one place a
+// divergent second filter could be introduced with nothing failing. It must apply the
+// same rules Handle applies to a raw call site's attrs.
+func TestWithAttrsRefusesUndeclaredAndReservedKeys(t *testing.T) {
+	lg, buf := newTestLogger(t, slog.LevelInfo)
+	sl := slog.New(lg.Handler()).With(
+		slog.String("user_id", "u_1"),         // declared: kept
+		slog.String("argon2_hash", "$argon2"), // undeclared: dropped
+		slog.Int64("seq", 99),                 // reserved: dropped
+	)
+	sl.Info("derived line")
+
+	m := oneLine(t, buf)
+	if m["app"] != "kytest" {
+		t.Errorf("app = %v, want kytest to survive on a derived handler", m["app"])
+	}
+	if m["facility"] != float64(facilityLocal0) {
+		t.Errorf("facility = %v, want %d to survive on a derived handler", m["facility"], facilityLocal0)
+	}
+	if m["user_id"] != "u_1" {
+		t.Errorf("a declared key attached via With was not kept: %v", m)
+	}
+	if _, ok := m["argon2_hash"]; ok {
+		t.Error("an undeclared key attached via With reached the line")
+	}
+	if _, ok := m["seq"]; ok {
+		t.Error("a reserved key attached via With reached the line")
+	}
+	if m["dropped_fields"] != float64(2) {
+		t.Errorf("dropped_fields = %v, want 2", m["dropped_fields"])
+	}
+}
+
+// TestWithAttrsCountsTruncation pins the fix for a review finding: WithAttrs discarded
+// filter's dropped and truncated counts, so a value cut at .With() time went uncounted —
+// contradicting the package's own promise that a loss shows up on the line.
+func TestWithAttrsCountsTruncation(t *testing.T) {
+	lg, buf := newTestLogger(t, slog.LevelInfo)
+	sl := slog.New(lg.Handler()).With(slog.String("user_id", strings.Repeat("u", 1000)))
+	sl.Info("derived line")
+
+	m := oneLine(t, buf)
+	if m["truncated_fields"] != float64(1) {
+		t.Errorf("truncated_fields = %v, want 1 for a value truncated at With time", m["truncated_fields"])
+	}
+}
+
+// TestRequestIDTruncationIsCounted pins the same omission as above, found in the
+// request-id path: an over-long request ID truncated silently.
+func TestRequestIDTruncationIsCounted(t *testing.T) {
+	lg, buf := newTestLogger(t, slog.LevelInfo)
+	ctx := WithRequestID(context.Background(), strings.Repeat("r", 1000))
+	lg.Log(ctx, Started)
+
+	m := oneLine(t, buf)
+	if m["truncated_fields"] != float64(1) {
+		t.Errorf("truncated_fields = %v, want 1 for an over-long request id", m["truncated_fields"])
+	}
+	if got := m["request_id"].(string); len(got) != maxValueBytes {
+		t.Errorf("request_id is %d bytes, want %d", len(got), maxValueBytes)
+	}
+}
+
+func TestFromEnv(t *testing.T) {
+	cases := []struct {
+		name    string
+		env     string
+		wantErr bool
+		want    slog.Level
+	}{
+		{name: "unset reads as info", env: "", want: slog.LevelInfo},
+		{name: "valid lowercase level", env: "warn", want: slog.LevelWarn},
+		{name: "invalid level errors", env: "nope", wantErr: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("KY_LOG_LEVEL", c.env)
+			cfg, err := FromEnv()
+			if c.wantErr {
+				if err == nil {
+					t.Fatal("FromEnv accepted an invalid level")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("FromEnv: %v", err)
+			}
+			if cfg.Level != c.want {
+				t.Errorf("Level = %v, want %v", cfg.Level, c.want)
+			}
+		})
 	}
 }
