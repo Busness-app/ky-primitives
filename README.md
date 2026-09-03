@@ -142,7 +142,7 @@ its private key from a 32-byte seed, and the seed is the only thing this package
 
 ```go
 priv, err := recoverykey.Generate()                  // once, in kyrecovery's ceremony
-shares, err := recoverykey.Split(priv, 3, 5)         // shamir shares of the seed; print, then zero priv
+shares, err := recoverykey.Split(priv, 3, 5)         // shamir shares of the seed; print the cards, then destroy the host
 pub := priv.Public()                                 // hand pub.Bytes() to every product; pin pub.ID()
 
 pub, err := recoverykey.ParsePublicKey(b)            // in a product, from keyfile.Load
