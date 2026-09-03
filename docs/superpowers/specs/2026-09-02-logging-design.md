@@ -35,7 +35,7 @@ existing local chained file.
 | A collector agent ships; the library formats | No reconnect, TLS, spool or backpressure code to keep true. A crashed product still gets its last lines shipped. |
 | Closed field vocabulary, declared in one place | A key that was never declared cannot be emitted. Replaces kypost's denylist, which fails silently on a key nobody thought of. |
 | Values are typed and bounded, never `any` | You cannot log a whole request struct and find out later it held a token. |
-| Audit lines are flat and carry `seq`/`prev`/`hash`/`fields` | `cmd/kyauditverify` parses the shipped stream unchanged. |
+| Audit lines are flat and carry `seq`/`prev`/`hash`/`fields` | `cmd/kyauditverify` parses them unchanged, once the export is filtered to lines carrying `hash`. |
 | Audit storage stays with the product | `auditchain` "deliberately owns no storage" and this does not change that. |
 | Both a typed API and a `slog.Handler` | kydns threads `*slog.Logger` through nine components; without a handler it could not adopt. |
 
@@ -140,7 +140,10 @@ high-value target, and one built hastily is worse than not having it.
 The one capability off-the-shelf cannot provide is chain verification, and it already
 exists. `cmd/kyauditverify` reads `auditchain.Record` values one per JSON line, plus an
 anchor, and verifies. If audit lines are shaped so that tool parses them, "central audit
-verification" is the existing 111-line command pointed at the collector's export.
+verification" is the existing 111-line command pointed at the collector's export, filtered
+first to the lines carrying `hash` — an ordinary log line has none of the four audit keys
+and would otherwise read to `VerifyStream` as a broken chain, not as data outside the
+tool's scope.
 
 A tamper-evident chain nobody checks is decoration. This is the cheapest way to check it.
 
@@ -157,9 +160,9 @@ listening on the Unix socket.
 
 ```go
 type Config struct {
-    App   string      // required; emitted as "app", identifies the product
-    Level slog.Level  // default slog.LevelInfo
-    Out   io.Writer   // default os.Stderr
+    App   string        // required; emitted as "app", identifies the product
+    Level slog.Leveler  // default slog.LevelInfo when nil; a *slog.LevelVar works too
+    Out   io.Writer     // default os.Stderr
 }
 
 func FromEnv() (Config, error)  // reads KY_LOG_LEVEL; App and Out still set by the caller
@@ -242,9 +245,10 @@ What it removes is the accidental leak, which is the one that actually happens.
 
 **Reserved keys**, which the `Declare*` functions refuse: `timestamp`, `level`, `message`,
 `app`, `event`, `request_id`, `severity`, `facility`, `dropped_fields`,
-`truncated_fields`, and — because audit lines are flat — `seq`, `prev`, `hash`, `fields`.
-A declared field colliding with one of the last four would corrupt a chain record on its
-way through the log stream.
+`truncated_fields`, and — because audit lines are flat — `seq`, `prev`, `hash`, `fields`,
+`audit_fields_mismatch`. A declared field colliding with one of the four audit keys would
+corrupt a chain record on its way through the log stream; colliding with
+`audit_fields_mismatch` could claim a divergent line agrees after all.
 
 The handler drops reserved keys arriving as raw slog attributes and sets them itself, so a
 product mid-migration cannot contradict them. The four audit keys and `event` are stronger
@@ -255,9 +259,10 @@ cannot construct. Raw slog cannot forge an audit record into the stream.
 
 Applied to every string value before it can reach a line:
 
-- Control characters (`< 0x20`, and `0x7f`) are replaced with U+FFFD. This is what makes
-  log injection impossible, and it is applied to the value, not to the line, so it cannot
-  be skipped by a later renderer.
+- Control characters (`< 0x20`, `0x7f`, and the C1 range `0x80`-`0x9f`) are replaced with
+  U+FFFD. This is what makes log injection impossible, and it is applied to the value, not
+  to the line, so it cannot be skipped by a later renderer — nor by the fact that a JSON
+  string encoder does not escape C1 on its own.
 - Values cap at 256 bytes, truncated on a rune boundary with a trailing `…`, and the line
   carries a reserved `truncated_fields` count. The cap bounds the blast radius of any
   single field and keeps a line from growing without limit. The count is a number rather
