@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Busness-app/ky-primitives/capsule"
+	"github.com/Busness-app/ky-primitives/recoverykey"
 )
 
 // A capsule this package wrote, committed, and opened on every run. If it stops opening, a
@@ -24,9 +25,9 @@ func TestOpensEveryPersistedCapsule(t *testing.T) {
 
 	for _, p := range paths {
 		t.Run(filepath.Base(p), func(t *testing.T) {
-			raw, key := loadFixture(t, p)
+			raw, with := loadFixture(t, p)
 
-			_, files, err := capsule.Open(raw, key, filepath.Join(t.TempDir(), "restore"))
+			_, files, err := capsule.Open(raw, with, filepath.Join(t.TempDir(), "restore"))
 			if err != nil {
 				t.Fatalf("a capsule written by an earlier version of this package failed to open: %v", err)
 			}
@@ -45,10 +46,10 @@ func TestOpensEveryPersistedCapsule(t *testing.T) {
 func TestOpenRejectsWrongKey(t *testing.T) {
 	for _, p := range fixturePaths(t) {
 		t.Run(filepath.Base(p), func(t *testing.T) {
-			raw, key := loadFixture(t, p)
-			key[0] ^= 0xFF
+			raw, _ := loadFixture(t, p)
+			wrong := testRecoveryKey(t)
 
-			if _, _, err := capsule.Open(raw, key, ""); err == nil {
+			if _, _, err := capsule.Open(raw, wrong, ""); err == nil {
 				t.Fatal("a capsule opened with the wrong key")
 			}
 		})
@@ -62,10 +63,10 @@ func TestOpenRejectsWrongKey(t *testing.T) {
 func TestOpenRejectsWrongKeyWithoutErrCorruptCapsule(t *testing.T) {
 	for _, p := range fixturePaths(t) {
 		t.Run(filepath.Base(p), func(t *testing.T) {
-			raw, key := loadFixture(t, p)
-			key[0] ^= 0xFF
+			raw, _ := loadFixture(t, p)
+			wrong := testRecoveryKey(t)
 
-			_, _, err := capsule.Open(raw, key, "")
+			_, _, err := capsule.Open(raw, wrong, "")
 			if err == nil {
 				t.Fatal("a capsule opened with the wrong key")
 			}
@@ -79,8 +80,9 @@ func TestOpenRejectsWrongKeyWithoutErrCorruptCapsule(t *testing.T) {
 // The other half: a malformed container — here, a manifest field that is not the object
 // Open expects — does wrap ErrCorruptCapsule. It never reaches AES-GCM at all.
 func TestOpenReportsAnUnreadableManifestAsErrCorruptCapsule(t *testing.T) {
-	raw := []byte(`{"format":"kycap/2","manifest":"not an object","ciphertext":"AAAA"}`)
-	if _, _, err := capsule.Open(raw, make([]byte, 32), ""); !errors.Is(err, capsule.ErrCorruptCapsule) {
+	priv := testRecoveryKey(t)
+	raw := []byte(`{"format":"kycap/3","manifest":"not an object","ciphertext":"AAAA"}`)
+	if _, _, err := capsule.Open(raw, priv, ""); !errors.Is(err, capsule.ErrCorruptCapsule) {
 		t.Fatalf("got %v, want ErrCorruptCapsule for an unreadable manifest", err)
 	}
 }
@@ -89,10 +91,10 @@ func TestOpenReportsAnUnreadableManifestAsErrCorruptCapsule(t *testing.T) {
 func TestOpenRejectsTamperedContainer(t *testing.T) {
 	for _, p := range fixturePaths(t) {
 		t.Run(filepath.Base(p), func(t *testing.T) {
-			raw, key := loadFixture(t, p)
+			raw, with := loadFixture(t, p)
 			raw[len(raw)/2] ^= 0xFF
 
-			if _, _, err := capsule.Open(raw, key, ""); err == nil {
+			if _, _, err := capsule.Open(raw, with, ""); err == nil {
 				t.Fatal("a tampered capsule opened cleanly")
 			}
 		})
@@ -104,12 +106,13 @@ func TestOpenRejectsTamperedContainer(t *testing.T) {
 // one and handing back its files told the caller nothing about whether the manifest
 // describing them was real.
 func TestOpenRejectsRetiredContainers(t *testing.T) {
+	priv := testRecoveryKey(t)
 	for name, raw := range map[string][]byte{
 		"kycap/1": []byte(`{"format":"kycap/1","manifest":{"payload_hash":"00"},"ciphertext":"AAAAAAAAAAAAAAAAAAAAAA=="}`),
 		"tar":     append([]byte("manifest.json\x00"), make([]byte, 1024)...),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, _, err := capsule.Open(raw, make([]byte, 32), ""); err == nil {
+			if _, _, err := capsule.Open(raw, priv, ""); err == nil {
 				t.Fatalf("a retired %s container opened", name)
 			}
 		})
@@ -117,6 +120,7 @@ func TestOpenRejectsRetiredContainers(t *testing.T) {
 }
 
 func TestOpenRejectsUnknownContainer(t *testing.T) {
+	priv := testRecoveryKey(t)
 	for name, raw := range map[string][]byte{
 		"empty":      {},
 		"whitespace": []byte("   \n\t "),
@@ -124,7 +128,7 @@ func TestOpenRejectsUnknownContainer(t *testing.T) {
 		"wrong json": []byte(`{"format":"kycap/99","manifest":{},"ciphertext":"AAAA"}`),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, _, err := capsule.Open(raw, make([]byte, 32), ""); err == nil {
+			if _, _, err := capsule.Open(raw, priv, ""); err == nil {
 				t.Fatalf("%q opened as a capsule", name)
 			}
 		})
@@ -143,19 +147,35 @@ func fixturePaths(t *testing.T) []string {
 	return paths
 }
 
-func loadFixture(t *testing.T, path string) (raw, key []byte) {
+func loadFixture(t *testing.T, path string) (raw []byte, with recoverykey.PrivateKey) {
 	t.Helper()
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	keyHex, err := os.ReadFile(strings.TrimSuffix(path, ".kycap") + ".key")
+	seedHex, err := os.ReadFile(strings.TrimSuffix(path, ".kycap") + ".seed")
 	if err != nil {
 		t.Fatal(err)
 	}
-	key, err = hex.DecodeString(strings.TrimSpace(string(keyHex)))
+	seed, err := hex.DecodeString(strings.TrimSpace(string(seedHex)))
 	if err != nil {
-		t.Fatalf("fixture key is not hex: %v", err)
+		t.Fatalf("fixture seed is not hex: %v", err)
 	}
-	return raw, key
+	with, err = recoverykey.FromSeed(seed)
+	if err != nil {
+		t.Fatalf("fixture seed does not rebuild a key: %v", err)
+	}
+	return raw, with
+}
+
+// The kycap/2 capsule this package used to write is refused at the format check. It is
+// kept so that refusal is measured against a real container, not a hand-typed one.
+func TestRetiredKycap2FixtureIsRefused(t *testing.T) {
+	raw, err := os.ReadFile("../testdata/capsules/retired/kycap2.kycap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := capsule.Open(raw, testRecoveryKey(t), ""); !errors.Is(err, capsule.ErrUnknownContainer) {
+		t.Fatalf("got %v, want ErrUnknownContainer", err)
+	}
 }

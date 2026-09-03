@@ -25,8 +25,9 @@ func TestOpenRejectsATamperedManifest(t *testing.T) {
 
 	for name, edit := range edits {
 		t.Run(name, func(t *testing.T) {
-			raw, key, _, err := capsule.Seal("fixture", "0.0.0",
-				[]capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}, nil, nil, 2, 3)
+			priv := testRecoveryKey(t)
+			raw, _, err := capsule.Seal("fixture", "0.0.0",
+				[]capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}, nil, nil, 2, 3, priv.Public())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -38,7 +39,7 @@ func TestOpenRejectsATamperedManifest(t *testing.T) {
 			}
 			tampered := bytes.Replace(raw, []byte(edit.from), []byte(edit.to), 1)
 
-			if _, _, err := capsule.Open(tampered, key, ""); err == nil {
+			if _, _, err := capsule.Open(tampered, priv, ""); err == nil {
 				t.Fatalf("a capsule opened after its %s was rewritten without the key", name)
 			}
 		})
@@ -48,12 +49,13 @@ func TestOpenRejectsATamperedManifest(t *testing.T) {
 // The manifest is authenticated, so an untouched capsule must still open. Without this
 // the test above passes for a Seal that produces nothing openable at all.
 func TestOpenAcceptsAnUntamperedManifest(t *testing.T) {
-	raw, key, _, err := capsule.Seal("fixture", "0.0.0",
-		[]capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}, nil, nil, 2, 3)
+	priv := testRecoveryKey(t)
+	raw, _, err := capsule.Seal("fixture", "0.0.0",
+		[]capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}, nil, nil, 2, 3, priv.Public())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := capsule.Open(raw, key, ""); err != nil {
+	if _, _, err := capsule.Open(raw, priv, ""); err != nil {
 		t.Fatalf("a capsule this package just sealed did not open: %v", err)
 	}
 }
@@ -62,6 +64,7 @@ func TestOpenAcceptsAnUntamperedManifest(t *testing.T) {
 // backup that documents a 5-of-3 kit sends a custodian looking for shares that were never
 // issued.
 func TestSealRefusesImpossibleShareParameters(t *testing.T) {
+	priv := testRecoveryKey(t)
 	files := []capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}
 	for name, tc := range map[string]struct{ threshold, total int }{
 		"threshold above total": {5, 3},
@@ -72,7 +75,7 @@ func TestSealRefusesImpossibleShareParameters(t *testing.T) {
 		"total past the field":  {2, 256},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, _, _, err := capsule.Seal("x", "0", files, nil, nil, tc.threshold, tc.total); err == nil {
+			if _, _, err := capsule.Seal("x", "0", files, nil, nil, tc.threshold, tc.total, priv.Public()); err == nil {
 				t.Fatalf("sealed a capsule advertising %d-of-%d", tc.threshold, tc.total)
 			}
 		})

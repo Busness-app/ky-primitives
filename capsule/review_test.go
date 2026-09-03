@@ -47,11 +47,12 @@ func payloadFailingPartway(t *testing.T) []byte {
 // has, and it was reachable by sealing one file too many.
 func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 	t.Run("more files than Open permits", func(t *testing.T) {
+		priv := testRecoveryKey(t)
 		files := make([]File, maxCapsuleFiles+1)
 		for i := range files {
 			files[i] = File{Path: fmt.Sprintf("f%05d", i), Content: []byte("x"), Mode: 0600}
 		}
-		if _, _, _, err := Seal("t", "1", files, nil, nil, 2, 3); !errors.Is(err, ErrCapsuleTooLarge) {
+		if _, _, err := Seal("t", "1", files, nil, nil, 2, 3, priv.Public()); !errors.Is(err, ErrCapsuleTooLarge) {
 			t.Fatalf("got %v, want ErrCapsuleTooLarge", err)
 		}
 	})
@@ -61,9 +62,10 @@ func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 	// refused it forever. Nothing bounds the recipe, so it is the growth path that stays
 	// once the file list has moved into the payload.
 	t.Run("manifest past what parseContainer permits", func(t *testing.T) {
+		priv := testRecoveryKey(t)
 		recipe := map[string]any{"steps": strings.Repeat("s", maxManifestBytes)}
 		files := []File{{Path: "a.txt", Content: []byte("x"), Mode: 0600}}
-		_, _, _, err := Seal("t", "1", files, nil, recipe, 2, 3)
+		_, _, err := Seal("t", "1", files, nil, recipe, 2, 3, priv.Public())
 		if !errors.Is(err, ErrCapsuleTooLarge) {
 			t.Fatalf("got %v, want ErrCapsuleTooLarge", err)
 		}
@@ -76,11 +78,12 @@ func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 	// the list is the payload member Open reads under maxFileListBytes. Seal must refuse
 	// what Open would refuse here too.
 	t.Run("file list past what Open permits", func(t *testing.T) {
+		priv := testRecoveryKey(t)
 		files := make([]File, maxCapsuleFiles)
 		for i := range files {
 			files[i] = File{Path: fmt.Sprintf("%04d", i) + strings.Repeat("p", 196), Content: []byte("x"), Mode: 0600}
 		}
-		_, _, _, err := Seal("t", "1", files, nil, nil, 2, 3)
+		_, _, err := Seal("t", "1", files, nil, nil, 2, 3, priv.Public())
 		if !errors.Is(err, ErrCapsuleTooLarge) {
 			t.Fatalf("got %v, want ErrCapsuleTooLarge", err)
 		}
@@ -90,15 +93,16 @@ func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 	})
 
 	t.Run("exactly the limit still seals", func(t *testing.T) {
+		priv := testRecoveryKey(t)
 		files := make([]File, maxCapsuleFiles)
 		for i := range files {
 			files[i] = File{Path: fmt.Sprintf("f%05d", i), Content: []byte("x"), Mode: 0600}
 		}
-		raw, key, _, err := Seal("t", "1", files, nil, nil, 2, 3)
+		raw, _, err := Seal("t", "1", files, nil, nil, 2, 3, priv.Public())
 		if err != nil {
 			t.Fatalf("the limit itself was refused: %v", err)
 		}
-		_, got, err := Open(raw, key, "")
+		_, got, err := Open(raw, priv, "")
 		if err != nil {
 			t.Fatalf("Open refused a capsule Seal wrote: %v", err)
 		}
@@ -113,11 +117,12 @@ func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 // path then matched no file, and the published mode was one extraction deliberately
 // refuses to apply.
 func TestManifestEntriesDescribeWhatExtractionProduces(t *testing.T) {
+	priv := testRecoveryKey(t)
 	files := []File{
 		{Path: "./a.txt", Content: []byte("a"), Mode: 0o644},
 		{Path: "d//e/../e/f.txt", Content: []byte("f"), Mode: 0o777},
 	}
-	raw, key, m, err := Seal("t", "1", files, nil, nil, 2, 3)
+	raw, m, err := Seal("t", "1", files, nil, nil, 2, 3, priv.Public())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +139,7 @@ func TestManifestEntriesDescribeWhatExtractionProduces(t *testing.T) {
 		t.Errorf("manifest mode %04o, want 0700", got)
 	}
 
-	_, opened, err := Open(raw, key, "")
+	_, opened, err := Open(raw, priv, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,10 +172,11 @@ func TestSealRefusesPathsThatCollideAfterNormalisation(t *testing.T) {
 		{"d/e", "d/../d/e"},
 	} {
 		t.Run(paths[0]+" vs "+paths[1], func(t *testing.T) {
-			_, _, _, err := Seal("t", "1", []File{
+			priv := testRecoveryKey(t)
+			_, _, err := Seal("t", "1", []File{
 				{Path: paths[0], Content: []byte("first"), Mode: 0600},
 				{Path: paths[1], Content: []byte("second"), Mode: 0600},
-			}, nil, nil, 2, 3)
+			}, nil, nil, 2, 3, priv.Public())
 			if !errors.Is(err, ErrDuplicatePath) {
 				t.Fatalf("got %v, want ErrDuplicatePath", err)
 			}
@@ -183,8 +189,9 @@ func TestSealRefusesAnOversizedMember(t *testing.T) {
 	// bounds a declared hdr.Size from an attacker-controlled tar header -- there is no
 	// declared length to lie about here. Exercising the check needs a real allocation over
 	// maxCapsuleFileBytes.
+	priv := testRecoveryKey(t)
 	content := make([]byte, maxCapsuleFileBytes+1)
-	_, _, _, err := Seal("t", "1", []File{{Path: "big", Content: content, Mode: 0600}}, nil, nil, 2, 3)
+	_, _, err := Seal("t", "1", []File{{Path: "big", Content: content, Mode: 0600}}, nil, nil, 2, 3, priv.Public())
 	content = nil
 	if !errors.Is(err, ErrCapsuleTooLarge) {
 		t.Fatalf("got %v, want ErrCapsuleTooLarge", err)
@@ -212,11 +219,12 @@ func TestAFailedExtractionLeavesNothingBehind(t *testing.T) {
 	}
 
 	// A retry must succeed rather than hit ErrTargetNotEmpty.
-	raw, key, _, err := Seal("t", "1", []File{{Path: "a.txt", Content: []byte("ok"), Mode: 0600}}, nil, nil, 2, 3)
+	priv := testRecoveryKey(t)
+	raw, _, err := Seal("t", "1", []File{{Path: "a.txt", Content: []byte("ok"), Mode: 0600}}, nil, nil, 2, 3, priv.Public())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Open(raw, key, target); err != nil {
+	if _, _, err := Open(raw, priv, target); err != nil {
 		t.Fatalf("retry after a failed restore: %v", err)
 	}
 }
@@ -235,13 +243,14 @@ func TestExtractionCannotEscapeThroughASymlinkedParent(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	raw, key, _, err := Seal("t", "1", []File{
+	priv := testRecoveryKey(t)
+	raw, _, err := Seal("t", "1", []File{
 		{Path: "sub/stolen.txt", Content: []byte("secret"), Mode: 0600},
-	}, nil, nil, 2, 3)
+	}, nil, nil, 2, 3, priv.Public())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Open(raw, key, target); err == nil {
+	if _, _, err := Open(raw, priv, target); err == nil {
 		t.Fatal("extracted into a target holding a symlinked parent")
 	}
 	if _, err := os.Stat(filepath.Join(outside, "stolen.txt")); err == nil {

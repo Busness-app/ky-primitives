@@ -5,7 +5,7 @@ import (
 	"fmt"
 )
 
-// DecodeCiphertext reads the ciphertext field of a kycap/2 container.
+// DecodeCiphertext reads the ciphertext field of a kycap/3 container.
 //
 // Standard base64 only. Decoding used to accept raw-url as well, because ky_server_base
 // and gridlock-server encoded that way — in capsules neither of them ever persisted. With

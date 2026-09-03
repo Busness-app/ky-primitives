@@ -2,26 +2,29 @@ package capsule
 
 import (
 	"bytes"
-	"crypto/aes"
-	"crypto/cipher"
+	"crypto/hpke"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+
+	"github.com/Busness-app/ky-primitives/recoverykey"
 )
 
 // KycapFileFormat identifies the one container this package reads and writes.
 //
-// It is kycap/2. Two containers came before it and both are gone: kysignon-server's
-// kycap/1 and kyrecovery-server's tar of manifest.json, nonce.bin and payload.enc. Each
-// authenticated its ciphertext and left the manifest outside the AEAD — kycap/1 entirely,
-// the tar container everything but its own aad string — so capsule_id, service_name,
-// threshold, total_shares and the verification recipe could all be rewritten by someone
-// who never learned the key. A 2-of-3 kit could be restated as 1-of-1 and still open.
+// It is kycap/3: kycap/2 with the payload sealed to the suite recovery public key through
+// HPKE instead of a per-capsule symmetric key the caller had to protect and split. Three
+// containers came before it and all are gone: kysignon-server's kycap/1 and
+// kyrecovery-server's tar, which authenticated their ciphertext and left the manifest
+// outside the AEAD — so capsule_id, service_name, threshold, total_shares and the
+// verification recipe could all be rewritten by someone who never learned the key — and
+// kycap/2, which fixed that and still handed back a raw key.
 //
-// Reading them was retired rather than kept, because neither server needs its old capsules
-// read and a reader that half-trusts a manifest cannot tell a caller which half.
-const KycapFileFormat = "kycap/2"
+// Reading them was retired rather than kept: a reader that half-trusts a manifest cannot
+// tell a caller which half, and nothing is in the wild.
+const KycapFileFormat = "kycap/3"
 
 // maxManifestBytes bounds the manifest before it is parsed. A manifest is a few hundred
 // bytes of JSON; a megabyte of it is already absurd.
@@ -88,9 +91,10 @@ func parseContainer(raw []byte) (kycapFile, error) {
 	return cf, nil
 }
 
-// decryptPayload parses the container, decrypts it under the manifest, and returns the
-// authenticated manifest alongside the hash-verified gzipped tar payload.
-func decryptPayload(raw, key []byte) (manifest, []byte, error) {
+// decryptPayload parses the container, checks it names the key it was given, decrypts it
+// under the manifest, and returns the authenticated manifest alongside the hash-verified
+// gzipped tar payload.
+func decryptPayload(raw []byte, with recoverykey.PrivateKey) (manifest, []byte, error) {
 	cf, err := parseContainer(raw)
 	if err != nil {
 		return manifest{}, nil, err
@@ -100,23 +104,37 @@ func decryptPayload(raw, key []byte) (manifest, []byte, error) {
 		return manifest{}, nil, fmt.Errorf("%w: unreadable manifest: %v", ErrCorruptCapsule, err)
 	}
 
-	sealed, err := DecodeCiphertext(cf.Ciphertext)
+	if with.IsZero() {
+		return manifest{}, nil, fmt.Errorf("capsule: %w", recoverykey.ErrUninitializedKey)
+	}
+
+	// Before any decapsulation. The manifest is not yet authenticated here, so this is a
+	// courtesy to the operator holding the wrong kit, not a security check — the AEAD below
+	// is the security check, and a forged ID that matches the wrong key still fails there.
+	if m.RecoveryKeyID != with.Public().ID() {
+		return manifest{}, nil, ErrWrongRecoveryKey
+	}
+
+	enc, err := base64.StdEncoding.DecodeString(m.EncapsulatedKey)
+	if err != nil {
+		return manifest{}, nil, fmt.Errorf("%w: encapsulated key is not standard base64: %v", ErrCorruptCapsule, err)
+	}
+	if len(enc) != recoverykey.EncapsulationBytes {
+		return manifest{}, nil, fmt.Errorf("%w: encapsulated key is %d bytes, want %d", ErrCorruptCapsule, len(enc), recoverykey.EncapsulationBytes)
+	}
+
+	ct, err := DecodeCiphertext(cf.Ciphertext)
 	if err != nil {
 		return manifest{}, nil, err
 	}
 
-	gcm, err := newGCM(key)
+	recipient, err := hpke.NewRecipient(enc, with.HPKE(), hpkeKDF(), hpkeAEAD(), hpkeInfo())
 	if err != nil {
-		return manifest{}, nil, err
+		return manifest{}, nil, fmt.Errorf("failed to decrypt capsule: %w", err)
 	}
-	if len(sealed) < gcm.NonceSize() {
-		return manifest{}, nil, fmt.Errorf("%w: ciphertext shorter than its nonce", ErrCorruptCapsule)
-	}
-	nonce, ct := sealed[:gcm.NonceSize()], sealed[gcm.NonceSize():]
-
 	// The manifest is the additional authenticated data, so any edit to it fails here
 	// rather than being handed to the caller as fact.
-	payload, err := gcm.Open(nil, nonce, ct, cf.Manifest)
+	payload, err := recipient.Open(cf.Manifest, ct)
 	if err != nil {
 		return manifest{}, nil, fmt.Errorf("failed to decrypt capsule: %w", err)
 	}
@@ -133,19 +151,8 @@ func checkContainerSize(part string, size int) error {
 	return nil
 }
 
-func newGCM(key []byte) (cipher.AEAD, error) {
-	if len(key) != 32 {
-		return nil, fmt.Errorf("AES-256 key must be exactly 32 bytes, got %d", len(key))
-	}
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
-	}
-	return cipher.NewGCM(block)
-}
-
-// verifyPayloadHash is the last line of defence when a wrong-but-valid key or a corrupt
-// share reconstructs plaintext that decrypts without an AEAD error. It is load-bearing.
+// verifyPayloadHash is the last line of defence when the AEAD passes for a reason nobody
+// predicted. It is load-bearing.
 func verifyPayloadHash(payload []byte, want string) error {
 	if want == "" {
 		return fmt.Errorf("%w: manifest declares no payload hash", ErrCorruptCapsule)

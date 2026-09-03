@@ -272,3 +272,98 @@ func TestAFailedWriteLeavesNoKeyFileBehind(t *testing.T) {
 		t.Fatalf("recovery attempt failed: %v", err)
 	}
 }
+
+func TestStoreWritesTheBytesItWasGiven(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested", "recovery.pub")
+	want := bytes.Repeat([]byte{0xAB}, 1216)
+	if err := Store(path, want, Raw); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	got, err := Load(path, 1216)
+	if err == nil {
+		t.Fatal("Load with Hex read a Raw file; the encodings must not read each other")
+	}
+	got, err = LoadEncoded(path, 1216, Raw)
+	if err != nil {
+		t.Fatalf("LoadEncoded: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatal("Load returned different bytes from what Store wrote")
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0600 {
+		t.Errorf("stored file mode is %04o, want 0600", perm)
+	}
+}
+
+// Replacing the public key file is the substitution attack: every later backup is sealed
+// to whoever wrote it. Store must refuse, and the first key must survive the attempt.
+func TestStoreRefusesToReplaceAnExistingKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "recovery.pub")
+	first := bytes.Repeat([]byte{0x01}, 32)
+	second := bytes.Repeat([]byte{0x02}, 32)
+	if err := Store(path, first, Raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := Store(path, second, Raw); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("second Store gave %v, want ErrExist", err)
+	}
+	got, err := LoadEncoded(path, 32, Raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, first) {
+		t.Fatal("the first key was replaced")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("directory holds %d entries after a refused Store, want 1", len(entries))
+	}
+}
+
+func TestStoreRefusesASillySize(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k")
+	if err := Store(path, make([]byte, minSize-1), Raw); err == nil {
+		t.Fatal("Store accepted a key below the floor")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a refused Store left a file behind")
+	}
+}
+
+func TestStoreRefusesAnUnknownEncoding(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k")
+	if err := Store(path, make([]byte, 32), Encoding(99)); err == nil {
+		t.Fatal("Store accepted an unknown encoding")
+	}
+}
+
+func TestStoreSurvivesAFailedWriteWithNoFileBehind(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "k")
+	original := writeAll
+	boom := errors.New("no space left on device")
+	writeAll = func(f *os.File, s string) error {
+		_, _ = f.WriteString(s[:len(s)/2])
+		return boom
+	}
+	t.Cleanup(func() { writeAll = original })
+
+	if err := Store(path, make([]byte, 32), Raw); !errors.Is(err, boom) {
+		t.Fatalf("got %v, want the write error", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("%d entries left behind after a failed Store", len(entries))
+	}
+}
