@@ -178,3 +178,28 @@ func TestZeroValueKeysAreErrors(t *testing.T) {
 		t.Fatalf("Seal to a zero key gave %v, want ErrUninitializedKey", err)
 	}
 }
+
+// Every product seals to one suite public key, and that key is not secret. So a capsule
+// sealed by anyone who holds it opens cleanly: Open proves integrity and binding to this
+// key, not who sealed it. Pinned here so the property is documented by a test rather than
+// discovered in a restore. Origin comes from the deposit channel, per the spec's non-goals.
+func TestOpenAcceptsACapsuleSealedByAnyoneHoldingThePublicKey(t *testing.T) {
+	custodians := testRecoveryKey(t)
+	// A stranger who has only the 1216 public bytes, as every product's key file holds them.
+	stranger, err := recoverykey.ParsePublicKey(custodians.Public().Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _, err := capsule.Seal("kypost", "9.9.9",
+		[]capsule.File{{Path: "planted.txt", Content: []byte("not from kypost"), Mode: 0600}}, nil, nil, 2, 3, stranger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, files, err := capsule.Open(raw, custodians, "")
+	if err != nil {
+		t.Fatalf("Open refused a capsule sealed to the correct public key: %v", err)
+	}
+	if m.ServiceName != "kypost" || len(files) != 1 {
+		t.Fatal("Open returned something other than what the stranger sealed")
+	}
+}

@@ -82,9 +82,9 @@ type UnverifiedManifest struct {
 // wanted, but an UnverifiedManifest cannot be passed where a Manifest is required.
 //
 // A Manifest is authenticated, not validated. Open proves the manifest is the one that was
-// sealed under this key; it does not re-apply Seal's topology rule, so a kit recorded as
-// 0-of-0 by some other writer opens without complaint. Check the numbers you intend to act
-// on.
+// sealed to this recovery key, by whoever held its public half; it does not re-apply
+// Seal's topology rule, so a kit recorded as 0-of-0 by some other writer opens without
+// complaint. Check the numbers you intend to act on.
 type Manifest struct {
 	UnverifiedManifest
 }

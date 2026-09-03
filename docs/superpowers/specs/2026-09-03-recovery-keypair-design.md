@@ -97,15 +97,18 @@ yields a different keypair and is caught by `capsule.Open`'s key ID compare.
 
 | Call | Host | When |
 |---|---|---|
-| `Generate`, `Split`, `Public().ID()`, `Public().Bytes()` | kyrecovery | Once, in the ceremony. Seed zeroed after `Split`. Never persisted. |
+| `Generate`, `Split`, `Public().ID()`, `Public().Bytes()` | kyrecovery | Once, in the ceremony. Never logged, persisted or returned. Ephemeral host, destroyed after `Split`. |
 | `ParsePublicKey`, `keyfile.Store` | each product | At pairing, receiving the public key over the authenticated channel. |
 | `ParsePublicKey` from `keyfile.Load` | each product | Every backup, to call `capsule.Seal`. |
 | `Combine`, `FromSeed` | the recovering product | At restore, after k shares arrive. Dropped when `Open` returns. |
 
 The ceremony is the one recorded exception to "kyrecovery never holds the key". It holds
 the seed for the duration of `Generate` and `Split`, in memory, and the ceremony code must
-zero it and must not log it, persist it, or return it to any caller. That requirement is
-Plan 5's to enforce and test; this document states it so Plan 5 cannot miss it.
+not log it, persist it, or return it to any caller. It cannot be erased from a Go process
+(value copies, the HPKE key's state, the garbage collector), so the ceremony runs on a
+dedicated ephemeral host with swap off and core dumps disabled, destroyed after `Split`
+returns. That requirement is Plan 5's to enforce and test; this document states it so
+Plan 5 cannot miss it.
 
 ---
 
@@ -226,7 +229,8 @@ Rotation, when it comes, gets a deliberate path, not an overwrite.
 
 **Once, on kyrecovery.** `Generate`. `Split` k-of-n. Render each share with
 `shamir.Share.String()` onto a custodian card. Show `Public().ID()` so it can be written on
-the cards. Persist `Public().Bytes()` as the suite public key and pin its ID. Zero the seed.
+the cards. Persist `Public().Bytes()` as the suite public key and pin its ID. Destroy the
+host; the seed cannot be erased from a Go process.
 
 **At pairing, per product.** Kyrecovery hands the public key bytes over the authenticated
 channel. The product runs `ParsePublicKey` — which fails on any length but 1216 — then
@@ -368,7 +372,7 @@ added to the retirement table, and `## recoverykey` is added between `## capsule
 ## Follow-ups this design does not do
 
 - **Plan 2** picks up the `baseNonce` deletion and the sender/recipient contexts.
-- **Plan 5** owns the ceremony's zeroing and no-persist requirement, the key ID pin, the
+- **Plan 5** owns the ceremony's ephemeral-host and no-persist requirement, the key ID pin, the
   share relay, and the deposit-time refusal.
 - **Plan 3** moves gridlock to the new signatures.
 - **Rotation** gets its own design when a reason to rotate exists.

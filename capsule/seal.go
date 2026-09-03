@@ -29,6 +29,10 @@ import (
 // secret exists only inside crypto/hpke for the duration of this call, and the only thing
 // that opens the result is the recovery private key the custodians hold in shares. A
 // product that calls Seal holds nothing afterwards that it did not hold before.
+//
+// That is a statement about confidentiality, not origin: the public key is not secret, and
+// a capsule Open accepts could have been sealed by anyone who holds it. Authenticity comes
+// from the channel that deposits the capsule, not from the container.
 func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]any, threshold, totalShares int, to recoverykey.PublicKey) (raw []byte, m Manifest, err error) {
 	if len(files) == 0 {
 		return nil, Manifest{}, fmt.Errorf("refusing to seal a capsule with no files")

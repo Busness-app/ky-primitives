@@ -38,10 +38,11 @@ the day it lands.
 `Seal` mints a fresh key per capsule. Shares per capsule would mean a ceremony per backup,
 so instead the suite has one long-lived recovery keypair. Kyrecovery generates it in a
 one-time ceremony, splits the 32-byte seed into custodian shares, shows the cards, and
-zeroes the seed without persisting it — the single, recorded exception to "kyrecovery never
-holds the key". Each app receives the public key at pairing over the authenticated channel
-and stores only that; kyrecovery pins the key ID it handed out and refuses deposits sealed
-to any other. Sealing needs no secret and the ceremony runs once. k custodians can open
+destroys the ephemeral ceremony host without persisting the seed — the single, recorded
+exception to "kyrecovery never holds the key". Each app receives the public key at pairing
+over the authenticated channel and stores only that; kyrecovery pins the key ID it handed
+out and refuses deposits sealed to any other. Sealing needs no secret and the ceremony runs
+once. k custodians can open
 every product's backups; the custodians are the same people, so that is accepted and noted.
 Rejected: per-capsule shares; per-product keypairs (N ceremonies for no separation anyone
 would use); any product holding the private key.

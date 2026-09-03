@@ -30,9 +30,13 @@ Reads and writes the suite's encrypted backup container.
 `kycap/3`: a JSON object holding the manifest, a base64 ciphertext, and nothing else. The
 payload is sealed to the suite recovery public key through HPKE — X-Wing (ML-KEM-768 with
 X25519), HKDF-SHA256, AES-256-GCM — so `Seal` returns no key and a product that seals a
-backup holds nothing afterwards that opens it. The manifest is bound into the AEAD, so
-every field describing the capsule is authenticated rather than merely present, and it is
-carried and authenticated as the exact bytes that were read, not a re-encoding.
+backup holds nothing afterwards that opens it. The public key is not secret, so a
+successful `Open` proves the container is unmodified and was sealed to this key — not who
+sealed it, and not that it is the newest backup; origin and freshness come from
+kyrecovery's authenticated deposit record, and a restore must check `service_name`,
+`capsule_id` and `created_at` against what it expects. The manifest is bound into the
+AEAD, so every field describing the capsule is authenticated rather than merely present,
+and it is carried and authenticated as the exact bytes that were read, not a re-encoding.
 
 The manifest carries what identifies a capsule — `capsule_id`, `service_name`,
 `created_at`, `payload_hash`, the recovery topology, and two fields that name the key:
@@ -75,8 +79,10 @@ m, files, err := capsule.Open(raw, priv, "")                            // decod
 u, err := capsule.ReadUnverifiedManifest(raw)                           // no key; show, do not decide
 ```
 
-`Open` returns the manifest because a successful `Open` is the only proof it was not
-rewritten. `Seal` returns one too: `capsule_id`, `created_at`, `payload_hash` and
+`Open` returns the manifest because a successful `Open` is the proof that the container was
+not modified after sealing and was sealed to this recovery key — nothing more; see
+`capsule.Open`'s doc comment for what that does and does not prove. `Seal` returns one too:
+`capsule_id`, `created_at`, `payload_hash` and
 `encapsulated_key` are minted inside `Seal` and have no other source.
 `ReadUnverifiedManifest` returns a different type, `UnverifiedManifest`, so the compiler
 stops it reaching anything that decides on it.
@@ -145,7 +151,11 @@ priv, err := recoverykey.Combine(shares)             // at restore, from k custo
 
 `Generate` is called on exactly one host, once, and that host holds the seed in memory
 until `Split` returns. That is the one place in the suite the recovery private key exists
-outside custodian cards; the ceremony code must zero it and must never log or persist it.
+outside custodian cards. Go cannot reliably erase it — value copies, the HPKE key's own
+state and the garbage collector keep it recoverable from a core dump or a swap page for
+the process lifetime — so the ceremony code must never log, persist or return it, and the
+ceremony runs on a dedicated ephemeral host with swap off and core dumps disabled,
+destroyed after `Split` returns.
 
 `ID()` is the hex SHA-256 of the public key. It is what a capsule names, what kyrecovery
 pins per product, and what a custodian writes on a card. `FromSeed` refuses any length but

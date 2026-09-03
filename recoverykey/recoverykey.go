@@ -43,6 +43,12 @@ func kem() hpke.KEM { return hpke.MLKEM768X25519() }
 
 // PrivateKey is the recovery private key. It exists in memory during the ceremony that
 // splits it and during a restore that combines it, and nowhere else.
+//
+// It cannot be erased from a running Go process: value receivers, Seed's copies, the
+// embedded HPKE key's own state and the garbage collector all keep the seed recoverable
+// from a core dump or a swap page for the process lifetime. The ceremony therefore runs on
+// a dedicated ephemeral host with swap off and core dumps disabled, and that host is
+// destroyed after Split returns. The host is what gets thrown away, not the bytes.
 type PrivateKey struct {
 	seed [SeedBytes]byte
 	key  hpke.PrivateKey

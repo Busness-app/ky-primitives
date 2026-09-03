@@ -58,8 +58,14 @@ type File struct {
 // the directory must be empty or absent. When it is empty nothing is written and the files
 // are returned in memory.
 //
-// The manifest is returned because a successful Open is the only proof it was not
-// rewritten. Callers that want it without a key want ReadUnverifiedManifest, and should
+// The manifest is returned because a successful Open is the proof that the container was
+// not modified after sealing and was sealed to this recovery key. It proves nothing else:
+// not which product sealed it, not that it is the backup the caller expected, and not that
+// it is the newest one. Every product in the suite seals to the same public key, and that
+// key is not secret, so anyone holding it can mint a capsule this function accepts. A
+// caller acting on a restore must compare ServiceName, CapsuleID and CreatedAt against
+// what it expects, and take freshness from the deposit record rather than the container.
+// Callers that want the manifest without a key want ReadUnverifiedManifest, and should
 // read that type's doc comment first.
 //
 // A capsule names the recovery key it was sealed to. Open compares that name with the key
