@@ -1,4 +1,4 @@
-// Package keyfile loads a long-lived secret from disk, creating it on first use.
+// Package keyfile loads a long-lived key from disk, creating it on first use or storing one it was handed.
 //
 // Seven products in the suite did this seven ways, and the disagreements were not
 // stylistic. kynotes-server continued past a key file it could not decode and left the
@@ -106,6 +106,30 @@ func LoadEncoded(path string, size int, enc Encoding) ([]byte, error) {
 		return nil, fmt.Errorf("keyfile: unknown encoding %d", int(enc))
 	}
 	return read(path, size, enc)
+}
+
+// Store persists a key the caller already holds — a public key received at pairing — with
+// the durability and permissions of LoadOrCreate, and refuses to replace a file that exists.
+//
+// The refusal is the point. Replacing a product's recovery public key is how every later
+// backup gets sealed to whoever wrote the replacement; os.Link failing on an existing name
+// is what makes that attack fail rather than succeed silently. Rotation, when it comes,
+// gets a deliberate path, not an overwrite. The error satisfies errors.Is(err, fs.ErrExist).
+func Store(path string, key []byte, enc Encoding) error {
+	if len(key) < minSize {
+		return fmt.Errorf("keyfile: key is %d bytes, below the %d-byte floor", len(key), minSize)
+	}
+	if !enc.valid() {
+		return fmt.Errorf("keyfile: unknown encoding %d", int(enc))
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return fmt.Errorf("keyfile: %w", err)
+	}
+	return write(path, key, enc)
 }
 
 // RequireOwnerOnly reports whether path is readable by anyone but its owner. Nothing in
@@ -220,11 +244,18 @@ func create(path string, size int, enc Encoding) ([]byte, error) {
 	if _, err := randRead(key); err != nil {
 		return nil, fmt.Errorf("keyfile: %w", err)
 	}
+	if err := write(path, key, enc); err != nil {
+		return nil, err
+	}
+	return key, nil
+}
 
+// write is the durable, non-replacing write path shared by create and Store.
+func write(path string, key []byte, enc Encoding) error {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".keyfile-*.tmp")
 	if err != nil {
-		return nil, fmt.Errorf("keyfile: %w", err)
+		return fmt.Errorf("keyfile: %w", err)
 	}
 	tmpName := tmp.Name()
 	// Removed on every failure path below; a no-op once the rename has consumed it.
@@ -236,31 +267,28 @@ func create(path string, size int, enc Encoding) ([]byte, error) {
 	// CreateTemp makes the file 0600 already; set it explicitly so the guarantee does not
 	// depend on that staying true.
 	if err := tmp.Chmod(0600); err != nil {
-		return nil, fmt.Errorf("keyfile: %w", err)
+		return fmt.Errorf("keyfile: %w", err)
 	}
 	if err := writeAll(tmp, string(enc.encode(key))); err != nil {
-		return nil, fmt.Errorf("keyfile: %w", err)
+		return fmt.Errorf("keyfile: %w", err)
 	}
 	// Without the fsync a crash here leaves a zero-length file that the next boot reads
 	// as a corrupt key, which is the failure the refusal above then reports forever.
 	if err := tmp.Sync(); err != nil {
-		return nil, fmt.Errorf("keyfile: %w", err)
+		return fmt.Errorf("keyfile: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
-		return nil, fmt.Errorf("keyfile: %w", err)
+		return fmt.Errorf("keyfile: %w", err)
 	}
 
 	// os.Link rather than os.Rename: rename would silently replace a key another process
 	// created while we were writing, and this package must never destroy a key.
 	if err := os.Link(tmpName, path); err != nil {
-		return nil, err
+		return err
 	}
 	// And without syncing the directory the name can be lost even though its contents
 	// were durable.
-	if err := syncDir(dir); err != nil {
-		return nil, err
-	}
-	return key, nil
+	return syncDir(dir)
 }
 
 func syncDir(dir string) error {
