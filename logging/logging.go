@@ -178,6 +178,8 @@ func (h *handler) filter(attrs []slog.Attr) (kept []slog.Attr, dropped, truncate
 		case eventValue:
 			// Only this package can construct one, so the event key has one source.
 			kept = append(kept, slog.String("event", v.name))
+		case auditValue:
+			kept = append(kept, v.attrs()...)
 		case fieldValue:
 			if v.truncated {
 				truncated++
