@@ -21,6 +21,6 @@ func FuzzOpenNeverPanics(f *testing.F) {
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		// No target directory: this is about the parser, and writing to disk under fuzz
 		// would measure the filesystem instead.
-		_, _ = Open(raw, key, "")
+		_, _, _ = Open(raw, key, "")
 	})
 }

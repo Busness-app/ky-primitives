@@ -80,7 +80,7 @@ type Share struct {
 
 // String renders a share for a custodian card:
 //
-//	ky1-<threshold>-<set id>-<index>-<value>-<check>
+//	ky2-<threshold>-<set id>-<index>-<value>-<check>
 //
 // check is the first two bytes of SHA-256 over everything preceding it, so a card
 // mistyped under stress fails at parse rather than reconstructing a wrong secret.

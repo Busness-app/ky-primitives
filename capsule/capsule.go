@@ -42,18 +42,33 @@ type File struct {
 	Mode    os.FileMode
 }
 
-// Open parses a capsule of either container, decrypts it, verifies the payload hash, and
-// returns its files. When targetDir is non-empty the files are also written there under
-// the containment rules described in extract.go; the directory must be empty or absent.
+// Open parses a kycap/2 container, decrypts it, verifies the payload hash, and returns the
+// authenticated manifest with the files. When targetDir is non-empty the files are also
+// written there under the containment rules in extract.go; the directory must be empty or
+// absent. When it is empty nothing is written and the files are returned in memory.
+//
+// The manifest is returned because a successful Open is the only proof it was not
+// rewritten. Callers that want it without a key want ReadUnverifiedManifest, and should
+// read that type's doc comment first.
 //
 // key is raw bytes, never a hex string. The suite's implementations disagree on that
-// (ky_server_base passes hex, kysignon-server passes bytes) and bytes is the one that
-// cannot be got wrong silently: a hex string of the right length is a valid 64-byte key
-// that simply decrypts to garbage.
-func Open(raw, key []byte, targetDir string) ([]File, error) {
-	payload, err := decryptPayload(raw, key)
+// (ky_server_base passes hex, kysignon-server passes bytes). Passing the hex spelling of a
+// 32-byte key is 64 bytes, which newGCM refuses outright, so the mistake is loud here —
+// but it was silent in the implementations this replaced, which hashed or truncated
+// whatever they were handed into 32 bytes and decrypted to garbage.
+func Open(raw, key []byte, targetDir string) (Manifest, []File, error) {
+	m, payload, err := decryptPayload(raw, key)
 	if err != nil {
-		return nil, err
+		return Manifest{}, nil, err
 	}
-	return extractPayload(payload, targetDir)
+	// The file list is inside the payload, so it is read only after decryptPayload has
+	// authenticated the container and verified the payload hash. A capsule sealed before
+	// v0.3.0 carries no such member and reports no files; its payload hash still covers
+	// every byte of it.
+	files, entries, err := extractPayload(payload, targetDir)
+	if err != nil {
+		return Manifest{}, nil, err
+	}
+	m.Files = entries
+	return Manifest{UnverifiedManifest: m}, files, nil
 }

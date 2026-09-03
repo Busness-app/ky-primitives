@@ -85,6 +85,31 @@ func TestRefusesToReplaceAnUnreadableKeyFile(t *testing.T) {
 	}
 }
 
+// The read was an unbounded io.ReadAll, so a corrupt or attacker-controlled file was pulled
+// into memory whole before anything could refuse it. Refusing it must not replace it
+// either — that is the guarantee ErrUnreadable names.
+func TestReadRefusesAnOversizedFileWithoutTouchingIt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.key")
+	// Comfortably past 2*32+64; still a plausible file for something to leave behind.
+	content := bytes.Repeat([]byte("ab"), 1<<20)
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadOrCreate(path, 32)
+	if !errors.Is(err, ErrUnreadable) {
+		t.Fatalf("got %v, want ErrUnreadable", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, content) {
+		t.Fatal("the existing key file was modified")
+	}
+}
+
 // A key readable by any other account on the box is not a key. Nothing in the suite
 // checks this today.
 func TestRefusesAKeyFileOthersCanRead(t *testing.T) {

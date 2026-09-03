@@ -13,50 +13,54 @@ import (
 )
 
 // Seal writes a kycap/2 container and returns it with the freshly generated AES-256 key
-// that opens it.
+// that opens it, and the manifest it sealed.
+//
+// The manifest is returned because Seal is the only place CapsuleID, CreatedAt and
+// PayloadHash exist: they are minted here and have no other source. Returning only the
+// bytes left a caller re-parsing its own output through ReadUnverifiedManifest to recover
+// them — reaching for the keyless reader, whose doc comment says not to decide on what it
+// returns, to read fields it had just authored. This value is a Manifest because it is the
+// one that went into the AEAD, not one read back out of a container.
 //
 // Seal does not split the key into Shamir shares. The kycap/1 container has never carried
 // shares — kysignon-server's SerializeCapsule writes "manifest plus ciphertext, no
 // shards" — and the shares belong to the recovery kit that accompanies a capsule, not to
 // the capsule itself. Callers split the returned key themselves.
-func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]any, threshold, totalShares int) (raw, key []byte, err error) {
+func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]any, threshold, totalShares int) (raw, key []byte, m Manifest, err error) {
 	if len(files) == 0 {
-		return nil, nil, fmt.Errorf("refusing to seal a capsule with no files")
+		return nil, nil, Manifest{}, fmt.Errorf("refusing to seal a capsule with no files")
 	}
 	// The same invariant shamir.Split enforces. A capsule states its recovery topology in
 	// the manifest, and a capsule advertising 5-of-3 — or 0-of-3, which reads as "no
 	// shares needed" — sends a custodian looking for a kit that was never issuable.
 	// Recording the number without checking it makes the manifest decoration.
 	if threshold < 2 || totalShares < threshold || totalShares > 255 {
-		return nil, nil, fmt.Errorf("capsule: %d-of-%d is not a recoverable kit; need 2 <= threshold <= total <= 255", threshold, totalShares)
+		return nil, nil, Manifest{}, fmt.Errorf("capsule: %d-of-%d is not a recoverable kit; need 2 <= threshold <= total <= 255", threshold, totalShares)
 	}
 
-	payload, err := buildPayload(files)
+	payload, entries, err := buildPayload(files)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, Manifest{}, err
 	}
 
 	key = make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
-		return nil, nil, fmt.Errorf("failed to generate capsule key: %w", err)
+		return nil, nil, Manifest{}, fmt.Errorf("failed to generate capsule key: %w", err)
 	}
 
 	gcm, err := newGCM(key)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, Manifest{}, err
 	}
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
-		return nil, nil, fmt.Errorf("failed to generate capsule nonce: %w", err)
+		return nil, nil, Manifest{}, fmt.Errorf("failed to generate capsule nonce: %w", err)
 	}
 
 	sum := sha256.Sum256(payload)
 
 	now := time.Now().UTC()
-	// Marshalled once, then used twice: these bytes are the AAD and they are what lands
-	// in the container. Deriving the AAD from a second encoding of the same struct would
-	// make every capsule depend on two encoders agreeing forever.
-	manifestBytes, err := json.Marshal(manifest{
+	sealedManifest := manifest{
 		CapsuleID:          fmt.Sprintf("cap-%s-%d", serviceName, now.UnixNano()),
 		ServiceName:        serviceName,
 		AppVersion:         appVersion,
@@ -64,11 +68,30 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 		PayloadHash:        hex.EncodeToString(sum[:]),
 		Threshold:          threshold,
 		TotalShares:        totalShares,
+		Files:              entries,
 		Dependencies:       deps,
 		VerificationRecipe: recipe,
-	})
+	}
+	// Marshalled once, then used twice: these bytes are the AAD and they are what lands
+	// in the container. Deriving the AAD from a second encoding of the same struct would
+	// make every capsule depend on two encoders agreeing forever. The returned Manifest
+	// wraps this same value, so it is the sealed one rather than a second construction —
+	// TestSealReturnsTheManifestItSealed re-encodes it against the container's own bytes.
+	manifestBytes, err := json.Marshal(sealedManifest)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, Manifest{}, err
+	}
+	// The last limit Open enforces that sealing can reach. The manifest grows with caller
+	// input in several places — deps, recipe, and the version strings — and none of them is
+	// individually bounded, which is why the whole marshalled manifest is what gets
+	// measured here rather than any one field. The file list is not among them: it is not
+	// marshalled into the manifest at all, and buildPayload bounds it separately.
+	//
+	// Seal used to return a key for an oversized manifest and every later read of it failed
+	// with ErrCorruptCapsule — a backup that cannot be restored, found at restore time.
+	// TestSealRefusesWhatOpenWouldRefuse holds this, for both bounds.
+	if len(manifestBytes) > maxManifestBytes {
+		return nil, nil, Manifest{}, fmt.Errorf("%w: manifest is %d bytes, Open permits %d", ErrCapsuleTooLarge, len(manifestBytes), maxManifestBytes)
 	}
 
 	sealed := gcm.Seal(nonce, nonce, payload, manifestBytes)
@@ -82,23 +105,32 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 		Ciphertext: EncodeCiphertext(sealed),
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, Manifest{}, err
 	}
-	return raw, key, nil
+	return raw, key, Manifest{UnverifiedManifest: sealedManifest}, nil
 }
 
-// buildPayload writes the files as a gzipped tar, the plaintext both containers hold.
+// buildPayload writes the files as a gzipped tar, the plaintext both containers hold, and
+// the manifest entries describing it.
 //
-// Every limit Open enforces is enforced here too. Sealing is the only place the failure
-// is cheap: a capsule that Open refuses is a backup that cannot be restored, and it was
-// previously reachable by sealing one file past the limit, or two paths that normalise to
-// one destination.
-func buildPayload(files []File) ([]byte, error) {
+// Every limit Open enforces is enforced here too, bar the manifest bound Seal applies to
+// the encoded bytes. Sealing is the only place the failure is cheap: a capsule that Open
+// refuses is a backup that cannot be restored, and it was previously reachable by sealing
+// one file past the limit, or two paths that normalise to one destination.
+//
+// The entries are built here, from the normalised name and clamped mode this writes, so
+// they describe the members a restore actually produces rather than the caller's spelling
+// of them. Built anywhere else they are a second normalisation to keep in step.
+//
+// They are also written here, as the reserved member, so the list the key protects and the
+// list Seal returns are one encoding of one slice.
+func buildPayload(files []File) ([]byte, []FileEntry, error) {
 	if len(files) > maxCapsuleFiles {
-		return nil, fmt.Errorf("%w: %d files, Open permits %d", ErrCapsuleTooLarge, len(files), maxCapsuleFiles)
+		return nil, nil, fmt.Errorf("%w: %d files, Open permits %d", ErrCapsuleTooLarge, len(files), maxCapsuleFiles)
 	}
 	var total int64
 	seen := make(map[string]struct{}, len(files))
+	entries := make([]FileEntry, 0, len(files))
 
 	var buf bytes.Buffer
 	gw := gzip.NewWriter(&buf)
@@ -109,20 +141,20 @@ func buildPayload(files []File) ([]byte, error) {
 		// can never be one this package refuses to extract.
 		name, err := safeRelPath(f.Path)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if _, dup := seen[name]; dup {
-			return nil, fmt.Errorf("%w: %q", ErrDuplicatePath, name)
+			return nil, nil, fmt.Errorf("%w: %q", ErrDuplicatePath, name)
 		}
 		seen[name] = struct{}{}
 
 		size := int64(len(f.Content))
 		if size > maxCapsuleFileBytes {
-			return nil, fmt.Errorf("%w: %q is %d bytes, Open permits %d", ErrCapsuleTooLarge, name, size, maxCapsuleFileBytes)
+			return nil, nil, fmt.Errorf("%w: %q is %d bytes, Open permits %d", ErrCapsuleTooLarge, name, size, maxCapsuleFileBytes)
 		}
 		total += size
 		if total > maxCapsuleExpandedTotal {
-			return nil, fmt.Errorf("%w: payload exceeds %d bytes", ErrCapsuleTooLarge, maxCapsuleExpandedTotal)
+			return nil, nil, fmt.Errorf("%w: payload exceeds %d bytes", ErrCapsuleTooLarge, maxCapsuleExpandedTotal)
 		}
 		mode := f.Mode.Perm() & 0700
 		if mode == 0 {
@@ -136,18 +168,52 @@ func buildPayload(files []File) ([]byte, error) {
 			ModTime:  time.Now().UTC(),
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if _, err := tw.Write(f.Content); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
+
+		fsum := sha256.Sum256(f.Content)
+		entries = append(entries, FileEntry{
+			Path: name,
+			Size: size,
+			Sum:  hex.EncodeToString(fsum[:]),
+			Mode: mode,
+		})
+	}
+
+	// The file list, written last as the reserved member. Both limits are the ones Open
+	// applies to it: a capsule Seal writes is never one Open refuses. Nothing bounds a
+	// caller's path lengths individually, so a single absurd path is what these catch.
+	list, err := json.Marshal(entries)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(list) > maxFileListBytes {
+		return nil, nil, fmt.Errorf("%w: file list is %d bytes, Open permits %d", ErrCapsuleTooLarge, len(list), maxFileListBytes)
+	}
+	if total+int64(len(list)) > maxCapsuleExpandedTotal {
+		return nil, nil, fmt.Errorf("%w: payload exceeds %d bytes", ErrCapsuleTooLarge, maxCapsuleExpandedTotal)
+	}
+	if err := tw.WriteHeader(&tar.Header{
+		Name:     reservedFileList,
+		Mode:     0600,
+		Size:     int64(len(list)),
+		Typeflag: tar.TypeReg,
+		ModTime:  time.Now().UTC(),
+	}); err != nil {
+		return nil, nil, err
+	}
+	if _, err := tw.Write(list); err != nil {
+		return nil, nil, err
 	}
 
 	if err := tw.Close(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := gw.Close(); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return buf.Bytes(), nil
+	return buf.Bytes(), entries, nil
 }

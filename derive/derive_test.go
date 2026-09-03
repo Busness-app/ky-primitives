@@ -122,11 +122,31 @@ func TestAuthSecretRejectsBadParameters(t *testing.T) {
 
 // A caller that forgets to bound iterations lets a stored or client-supplied value ask
 // for hours of CPU per login. The bounds are the reason this is a package and not a call.
-func TestIterationBoundsAreTheOnesTheSuiteAgreedOn(t *testing.T) {
+func TestIterationBoundsHaveNotDrifted(t *testing.T) {
 	if MinIterations != 100000 {
 		t.Errorf("MinIterations is %d", MinIterations)
 	}
 	if MaxIterations != 12000000 {
 		t.Errorf("MaxIterations is %d", MaxIterations)
+	}
+}
+
+// The doc comment on MinIterations and MaxIterations states two numbers and says the
+// ceiling is unresolved between the products. Pin both, so that changing either is a
+// deliberate diff that has to update the note beside it — and so the note cannot go on
+// describing a ceiling this package no longer enforces.
+func TestIterationBoundsAreWhatTheDocSays(t *testing.T) {
+	if MinIterations != 100_000 {
+		t.Errorf("MinIterations is %d; the doc comment says 100,000", MinIterations)
+	}
+	if MaxIterations != 12_000_000 {
+		t.Errorf("MaxIterations is %d; the doc comment says 12,000,000 and calls it unresolved", MaxIterations)
+	}
+	// And the bounds are enforced, not merely declared.
+	if _, err := AuthSecret("pw", saltB64, MinIterations-1, "t/v1"); err == nil {
+		t.Error("accepted an iteration count below the floor")
+	}
+	if _, err := AuthSecret("pw", saltB64, MaxIterations+1, "t/v1"); err == nil {
+		t.Error("accepted an iteration count above the ceiling")
 	}
 }

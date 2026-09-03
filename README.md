@@ -5,8 +5,8 @@ Shared security primitives for the Busness.app suite.
 The dependency budget is **`golang.org/x/crypto` and the `golang.org/x/sys` it drags in,
 and nothing else.** Everything but `password` is standard-library-only. The rule was "no
 dependencies, ever" so that products with minimal trees could import this for free —
-`kypassword-server`'s `go.mod` requires nothing at all — and Argon2 is the one thing that
-broke it: the suite standardised on it for password hashing, and it is neither in the
+`kypassword-server`'s `go.mod` named no third-party module at all, and now names exactly
+one: this library — and Argon2 is the one thing that broke it: the suite standardised on it for password hashing, and it is neither in the
 standard library nor on a proposal track.
 
 Two tests hold that line. `TestModuleDependenciesAreAllowlisted` fails on any `require`
@@ -27,13 +27,24 @@ it is fixed in place rather than moved here.
 
 Reads and writes the suite's encrypted backup containers.
 
-Two containers hold real recovery data on disk, and they cannot read each other:
+One container holds real recovery data on disk today:
 
-One container, `kycap/2`: a JSON object holding the manifest, a base64 ciphertext with the
+`kycap/2`: a JSON object holding the manifest, a base64 ciphertext with the
 nonce prefixed, and nothing else. The manifest is bound into the AEAD, so every field
 describing the capsule is authenticated rather than merely present. It is carried and
 authenticated as the exact bytes that were read, not a re-encoding of a decoded struct, so
 nothing depends on two encoders agreeing forever.
+
+The manifest carries what identifies a capsule — `capsule_id`, `service_name`,
+`created_at`, `payload_hash` and the recovery topology — and no more. The per-member list
+of paths, sizes and SHA-256 digests travels inside the encrypted payload instead, as a
+reserved member, because the manifest is stored in the clear: a per-member digest read
+without the key is an offline confirmation oracle over the key material a capsule holds,
+and two capsules sharing one would show a signing key was never rotated between backups.
+`Open` fills `Manifest.Files` from inside the payload after the payload hash verifies;
+`ReadUnverifiedManifest` returns none, which is the right answer for a keyless read. This
+is the layout change behind `v0.3.0` — a `v0.2.0` capsule still opens, and reports no
+files, because it never carried an authenticated list.
 
 Two containers came before it and both are retired:
 
@@ -53,18 +64,39 @@ total past 255 — because a manifest that records recovery topology without che
 sends a custodian looking for shares that were never issued.
 
 ```go
-files, err := capsule.Open(raw, key, "/var/restore")
-raw, key, err := capsule.Seal(name, version, files, nil, nil, 2, 3)
+m, files, err := capsule.Open(raw, key, "/var/restore")
+raw, key, m, err := capsule.Seal(name, version, files, nil, nil, 2, 3)
 ```
+
+`Open` returns the manifest because a successful `Open` is the only proof it was not
+rewritten. `Seal` returns one too: `capsule_id`, `created_at` and `payload_hash` are minted
+inside `Seal` and have no other source, and without them on the return a caller had to
+re-parse its own output through `ReadUnverifiedManifest` to read fields it had just
+authored. `gridlock-server` did exactly that. `ReadUnverifiedManifest` reads a manifest
+without a key and returns a different type, `UnverifiedManifest`, so the compiler stops it
+reaching anything that decides on it — a threshold read without the key is a threshold
+anyone who can reach the file chose.
+
+```go
+m, files, err := capsule.Open(raw, key, "/var/restore")   // authenticated
+m, files, err := capsule.Open(raw, key, "")               // decode only, writes nothing
+raw, key, m, err := capsule.Seal(name, ver, files, nil, nil, 2, 3) // the sealed manifest
+u, err := capsule.ReadUnverifiedManifest(raw)             // no key; show, do not decide
+```
+
+`errors.Is` a failed `Open` against `ErrCorruptCapsule` to tell a malformed container from
+a bad key.
 
 The ciphertext field is standard base64 in and out. Decoding used to also accept raw-url,
 for capsules `ky_server_base` and `gridlock-server` encoded that way and never persisted;
 with one writer left, a second accepted spelling is only a second thing that has to stay
 true.
 
-`key` is raw bytes, never a hex string. The suite's implementations disagreed on that and
-bytes is the one that cannot be got wrong silently: a hex string of the right length is a
-valid 64-byte key that decrypts to garbage.
+`key` is raw bytes, never a hex string. The suite's implementations disagreed on that.
+Here the mistake is loud: `container.go` requires exactly 32 bytes, so the hex spelling of
+a 32-byte key is 64 bytes and is refused outright. It was silent in the implementations
+this replaced, which hashed or truncated whatever they were handed into 32 bytes and went
+on to decrypt garbage.
 
 ### Extraction hardening
 
@@ -81,13 +113,19 @@ its own. A failed extraction rolls back whatever it wrote, because the target mu
 to start and a half-restored keyset otherwise poisons every retry.
 
 Refused: path traversal, absolute paths, backslash separators, NUL bytes, symlinks,
-hardlinks, directories, device nodes, FIFOs, archives over 8 GiB expanded, members over
-4 GiB, more than 4096 files, and any restore into a non-empty directory. File modes are
-clamped to owner-only — a restored capsule carries signing keys, and an archive header is
-attacker-controlled.
+hardlinks, directories, device nodes, FIFOs, two members that normalise to one
+destination, archives over 256 MiB expanded, members over 64 MiB, more than 4096 files,
+and any restore into a non-empty directory. File modes are clamped to owner-only — a
+restored capsule carries signing keys, and an archive header is attacker-controlled.
 
-Every one of those is covered by a test in `capsule/hardening_test.go`. None is asserted
-without one.
+The two size numbers are memory budgets rather than archive sizes, because `Open` holds
+the raw container, the decrypted payload and every expanded member at once. They are the
+values `capsule/extract.go` enforces; raising them is what a streaming `Open` is for.
+
+Every refusal in that list is covered by a test in `capsule/hardening_test.go` or
+`capsule/review_test.go`, with one exception: the 256 MiB expansion budget and the 64 MiB
+member ceiling are exercised on the `Seal` side only, and `capsule/limits_test.go` asserts
+the constants rather than the refusal. An extraction-side test for both is outstanding.
 
 ### Fixtures
 
@@ -172,14 +210,20 @@ Three implementations existed, with three tuple layouts and three key policies:
 
 | | `kypassword-server` | `kybookmarks-server` | `kyrecovery-server` |
 |---|---|---|---|
-| Key | generated, ≥32 bytes enforced | **falls back to a literal in its own source** | HKDF from the keyring |
+| Key | generated, ≥32 bytes enforced | **a literal survives on the verify/convert path; the write path has no fallback** | HKDF from the keyring |
 | Truncation | anchor beside the key | undetectable | sequence numbers in the DB |
 | Fields | joined on bare `\|` | joined on bare `\|` | details pre-hashed |
 
-`kybookmarks-server/internal/audit/audit.go:44` substitutes
-`"kybookmarks-audit-default-secret"` when no key is configured, so an unconfigured
-deployment ships a chain anyone can recompute from the repository — and `VerifyChain` still
-passes. The key floor here is 32 bytes and there is no fallback.
+`kybookmarks-server/internal/audit/audit.go:50` keeps a literal,
+`"kybookmarks-default-hmac-secret"`, and its write path no longer reaches it —
+`loadOrCreateKey` has no constant fallback. What survives is narrower: the literal is what
+`legacyHash` verifies v0 entries against, so it can still *recognise* a log an attacker
+authored under it. It can no longer launder one. `converge` re-mints under the real key
+only when the high-water mark attests to that exact log — same record count and same tail
+hash — so a forged log is either refused by the mark or left in the old format for
+`Resume`'s digest check to reject. Only a genuine first boot, with no mark at all and every
+entry `v: 0`, converts. The key floor is 32 bytes, and on the write path — the one that
+mints and checks new records — there is no fallback at all.
 
 Every field is length-prefixed. Joining on a delimiter lets a field containing it shift
 into its neighbour and produce another record's digest, forging a record without the key;
@@ -216,20 +260,36 @@ err = auditchain.Verify(key, records, anchor)
 err = auditchain.VerifyStream(key, rows, anchor) // same, for a log too large to hold
 ```
 
+`VerifyRecord` asks whether a record carries its own digest, and nothing about where it
+sits. It also refuses a record numbered zero or carrying a malformed hash, because `Append`
+mints neither — a legacy log numbered from zero is exactly what a migration probe hands it.
+`Resume` answers a different question — is this the tail — and needs the anchor to do
+it. A conversion probe wants the first.
+
+`Replay` builds a chain in memory from field tuples and hands back the records with their
+final anchor, for a bulk rewrite that writes the log once. `Append`'s persist parameter
+means the chain advances only when the store agrees; passing one that does nothing per
+record would satisfy the signature and mean the opposite.
+
+Errors worth an `errors.Is` in a caller: `ErrWeakKey`, `ErrBrokenChain`.
+
 Chains in this suite reach six figures, and the bug that follows from paging them is
 specific: `kyrecovery-server`'s `VerifyChain` read a fixed 100000 events and then reported a
 sequence gap on a perfectly healthy chain. `VerifyStream` removes the reason to page. A
 record yielded with a non-nil error fails the verification rather than ending the walk, so a
 store that dies mid-read cannot look like a short chain.
 
-`Anchor` is `{Count, Hash}`, which matches `kyrecovery-server`'s `ledger.head` but **not**
-`kypassword-server`'s `audit.state`. That carries a third field — the first index required
-to be keyed — because KyPassword has a two-version chain: v0 records predating the key,
-verified under unkeyed SHA-256, and v1 under HMAC. Without that field an attacker downgrades
-a keyed entry to v0 and recomputes its hash with the public algorithm. This package has no
-version concept and cannot express it, so **KyPassword cannot migrate onto `auditchain`
-without either abandoning its v0 records or adding versioning here.** That is an open
-decision, not an oversight.
+`Anchor` is `{Count, Hash}`, which is exactly `kypassword-server`'s `audit.state` and
+`kyrecovery-server`'s `ledger.head`. KyPassword has migrated onto this package. It needed no
+version field: its legacy format was a *single* keyed HMAC digest, so `converge` verifies
+every entry under that digest and re-mints the whole log under `auditchain`'s in one atomic
+rewrite, leaving nothing to distinguish afterwards. The unkeyed variant that preceded it was
+deleted rather than carried, because a chain under no secret is one anyone who can write the
+log can recompute end to end.
+
+`kybookmarks-server` is the one with two legacy versions, `v: 0` and `v: 1`, and it converts
+the same way: a log is re-minted only when it verifies whole under one of them *and* the
+mark outside the log attests to it.
 
 `Fields` are opaque and storage is not this package's business. The three implementations
 logged different things and wrote to JSON lines, a file and a database; forcing one schema
@@ -295,11 +355,21 @@ The PHC parser compares against the canonical spelling rather than scanning. `fm
 reads the fields it is asked for and ignores the rest, so `p=4TRAILINGGARBAGE`, `p=04` and
 `v=19GARBAGE` all verified clean.
 
+`HashWith` mints at chosen `Params` — `{Memory, Time, Threads}`, bounded to the same band
+`Verify` accepts — for a test suite that cannot afford 64 MiB per derivation. `Hash` is the
+suite's answer, calling `HashWith` at `DefaultParams()`, and what production code calls.
+`DummyVerify` spends a verification's cost on a reject path that never reached one, so a
+missing account does not answer faster than a wrong password — though `ErrBusy` returns
+without deriving, so under load that leak reopens.
+
 ```go
 encoded, err := password.Hash(plaintext)        // "$argon2id$v=19$m=65536,t=3,p=4$..."
 ok, err := password.Verify(plaintext, encoded)  // ErrMalformed, never a silent default
 stale, err := password.NeedsRehash(encoded)     // upgrade on next successful login
+fast, err := password.HashWith(plaintext, password.Params{Memory: 8 * 1024, Time: 1, Threads: 1}) // tests only
 ```
+
+Errors worth an `errors.Is` in a caller: `ErrBusy`, `ErrMalformed`.
 
 `Verify` accepts a weaker-but-valid hash so a deployment rehashes on login instead of
 locking everyone out. Pair it with `NeedsRehash`; no Argon2 repo in the suite had either.
@@ -365,7 +435,7 @@ normalises internally so the two sides cannot disagree.
 ## keyfile
 
 Loads a long-lived secret from disk, creating it on first use. Seven products did this
-seven ways:
+seven ways; the five whose behaviour differs materially are:
 
 | Product | On a corrupt key file | First-boot race | fsync |
 |---|---|---|---|
@@ -376,9 +446,11 @@ seven ways:
 | `kypost-server` | refuses | mutex + recheck | yes |
 
 This package refuses rather than guesses: an existing file that does not decode to exactly
-the expected size is an error and is left untouched. `O_EXCL` settles the cross-process
-race, and the loser re-reads the winner's key rather than returning one that was never
-persisted. The file and its directory are both fsynced, because a crash after first boot
+the expected size is an error and is left untouched. The key is written to a temporary file
+and then `os.Link`ed to its final name, so the cross-process race is settled by `link`
+failing with `EEXIST` — not by `O_EXCL`, which would leave a partial file at the real path
+that this package then refuses to replace forever. The loser re-reads the winner's key
+rather than returning one that was never persisted. The file and its directory are both fsynced, because a crash after first boot
 otherwise leaves a zero-length file that the refusal above then reports forever.
 
 `RequireOwnerOnly` is exported separately. Nothing in the suite checked that a key file is
@@ -388,6 +460,38 @@ were secret.
 ```go
 key, err := keyfile.LoadOrCreate(filepath.Join(dir, "audit.key"), 32)
 ```
+
+`LoadOrCreate` and `Load` are hex; `LoadOrCreateEncoded` and `LoadEncoded` take an
+`Encoding` — `Hex`, `Raw` or `Base64` — because four products already wrote their key
+files those ways: `kydns-server` writes a raw 32-byte ed25519 seed, `kysignon-server`
+writes raw, `kynotes-server` and `kypost-server` write base64. A package that can only read
+hex is a package those four cannot adopt.
+
+`Load` never creates. `kypost-server` runs a daemon and an API process against the same
+key file, and the daemon must never mint a key the API process did not — when both are
+allowed to create, a restart in the wrong order leaves half the data under a key that no
+longer exists, and nothing reports it: every write succeeds, and every old read fails as
+though the data were corrupt.
+
+`FromEnv` reads a key from an environment variable, hex or base64, and applies the same
+*content* checks a file-supplied key gets — the encoding must decode and the result must be
+exactly `size` bytes — with set-but-unparseable an error rather than a fall-through to the
+file. It cannot apply the rest: a file key also goes through `openKey`'s symlink and
+`os.SameFile` checks and `checkKeyInfo`'s ownership and 0600 permission checks, and an
+environment variable has no inode to check. Four products check an environment variable before the file; doing that outside this
+package means the env-supplied key skips every check the file-supplied one gets.
+
+```go
+key, err := keyfile.LoadOrCreateEncoded(path, 32, keyfile.Base64)
+key, err := keyfile.Load(path, 32)                       // never creates
+key, ok, err := keyfile.FromEnv("KY_AUDIT_KEY", 32)       // ok is false when unset
+```
+
+A hex key file is lowercase hex with exactly one trailing newline — 65 bytes for a 32-byte
+key. That format is pinned by `TestHexFileFormat`.
+
+`errors.Is` a failed load against `ErrUnreadable` to tell a corrupt key file from a missing
+one — the second creates under `LoadOrCreate`, the first never does.
 
 ## derive
 
@@ -409,9 +513,19 @@ secret, err := derive.AuthSecret(password, saltB64, iterations, "kynotes/auth/v1
 salt, err := derive.SyntheticSalt(pairingKey, "login-salt/v1", username)
 ```
 
-Iterations are bounded to 100,000–12,000,000, the range both products already agreed on: the
-value arrives from a client or a stored record, and unbounded it buys minutes of CPU per
-login.
+Iterations are bounded to 100,000–12,000,000: the value arrives from a client or a stored
+record, and unbounded it buys minutes of CPU per login.
+
+The two products do not agree on the ceiling, and this package takes the looser of them.
+`kypost-server` enforces 12,000,000 with nothing tighter in front of it. `kynotes-server`'s
+derivation carries the same 12,000,000, and four of its five routes that accept a client
+iteration count cap it below that — one clamps an out-of-range value to 600,000 rather
+than refusing it, the other three refuse anything outside 100,000-1,000,000. Its fifth
+route, account recovery, checks the client's count only through the derivation's own
+100,000-12,000,000 bound, so kynotes does admit the full ceiling, just not on every route.
+**Adopting this package as the only bound would raise those four routes' ceiling
+twelvefold.** Which number is right is an open product decision; keep their tighter
+checks until it is made.
 
 A ceiling is not admission control, though — it bounds one call and says nothing about how
 many run at once, so a modest burst at the ceiling takes every core and starves the handlers
@@ -421,3 +535,31 @@ slot really is a core. The budget is `derive`'s own rather than `password`'s bec
 package is standard-library-only by design and importing `password` would pull `x/crypto`
 into it. `SyntheticSalt` lower-cases the username, because keying anything off the raw string
 lets one account present as many and quietly multiplies any per-account budget above it.
+
+`AuthSecretContext` bounds the wait for a slot. The budget stays separate from
+`password`'s — the two bound different resources, and this package importing `password`
+would pull `x/crypto` into it — but `derive.MaxConcurrent`, `password.MaxMemoryKiB` and
+`password.MaxLanes` are exported so a product running both can add them up.
+
+## Contributing
+
+Nothing in this repository builds its consumers. The check that does lives in each of them:
+`.github/workflows/ky-primitives-compat.yml` in `gridlock-server`, `kybookmarks-server` and
+`kypassword-server` builds and tests that consumer against this module's default branch
+instead of the version it pins. It runs on a daily schedule and on `workflow_dispatch`, not
+on pull requests -- in either repository.
+
+It lives there rather than here because the dependency only points one way without a
+credential. A consumer, public or private, can read this repository anonymously; reaching a
+private consumer from here needed an organisation token, which is why the job that used to
+do it never ran.
+
+**The cost is immediacy.** A change that breaks a consumer will not fail your pull request.
+It will fail in that consumer's scheduled run, up to a day later, in a repository you may not
+watch, and the person who sees it red will be someone whose own work is unrelated. If you are
+making a change you expect to break a consumer, do not wait for the schedule: open the
+consumer's PR alongside yours and run its compatibility workflow by hand from the Actions tab
+once this change is on `master`.
+
+The other six suite repositories do not import this module and have no such workflow; adding
+one is a copy of the file with the cron minute changed.

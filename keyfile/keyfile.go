@@ -15,13 +15,11 @@ package keyfile
 
 import (
 	cryptorand "crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 )
 
@@ -39,24 +37,37 @@ var (
 // caller, and a weak key is worse than a loud failure.
 const minSize = 16
 
-// mu serialises callers in this process. os.O_EXCL handles the cross-process race; this
-// stops the common in-process one without paying for a lock file.
+// mu serialises callers in this process. create's os.Link handles the cross-process race —
+// link fails with EEXIST when the name is taken, and unlike O_EXCL on the final path it
+// cannot leave a partial file there. This mutex stops the common in-process race without
+// paying for a lock file.
 var mu sync.Mutex
 
-// LoadOrCreate returns the size-byte secret stored at path, creating it if absent.
-//
-// The file holds lowercase hex: an operator can read it, copy it and diff it, and there
-// is no ambiguity about whether the bytes are raw, hex or base64 — which three of the
-// seven implementations disagreed about.
+// LoadOrCreate returns the size-byte secret stored at path as lowercase hex, creating it
+// if the file does not exist. See LoadOrCreateEncoded for other spellings.
 func LoadOrCreate(path string, size int) ([]byte, error) {
+	return LoadOrCreateEncoded(path, size, Hex)
+}
+
+// LoadOrCreateEncoded returns the size-byte secret stored at path in the given encoding,
+// creating it if the file does not exist.
+//
+// Hex is this package's default and the suite's preference: an operator can read it, copy
+// it and diff it, with no ambiguity about whether the bytes are raw, hex or base64 — which
+// three of the seven original implementations disagreed about. Raw and Base64 exist
+// because other products already wrote their key files that way.
+func LoadOrCreateEncoded(path string, size int, enc Encoding) ([]byte, error) {
 	if size < minSize {
 		return nil, fmt.Errorf("keyfile: size %d is below the %d-byte floor", size, minSize)
+	}
+	if !enc.valid() {
+		return nil, fmt.Errorf("keyfile: unknown encoding %d", int(enc))
 	}
 
 	mu.Lock()
 	defer mu.Unlock()
 
-	if key, err := read(path, size); err == nil {
+	if key, err := read(path, size, enc); err == nil {
 		return key, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -66,13 +77,35 @@ func LoadOrCreate(path string, size int) ([]byte, error) {
 		return nil, fmt.Errorf("keyfile: %w", err)
 	}
 
-	key, err := create(path, size)
+	key, err := create(path, size, enc)
 	if errors.Is(err, os.ErrExist) {
 		// Another process won the race between the read above and the create. Its key is
 		// the real one; ours was never written and nothing has used it.
-		return read(path, size)
+		return read(path, size, enc)
 	}
 	return key, err
+}
+
+// Load returns the size-byte secret stored at path as lowercase hex, and never creates
+// one. See LoadEncoded for other spellings.
+//
+// A process that reads a key another process minted must not be able to mint its own. When
+// both can, a restart in the wrong order leaves half the data under a key that no longer
+// exists, and nothing reports it — every write succeeds, and every old read fails as
+// though the data were corrupt.
+func Load(path string, size int) ([]byte, error) {
+	return LoadEncoded(path, size, Hex)
+}
+
+// LoadEncoded is Load for a key written in another spelling.
+func LoadEncoded(path string, size int, enc Encoding) ([]byte, error) {
+	if size < minSize {
+		return nil, fmt.Errorf("keyfile: size %d is below the %d-byte floor", size, minSize)
+	}
+	if !enc.valid() {
+		return nil, fmt.Errorf("keyfile: unknown encoding %d", int(enc))
+	}
+	return read(path, size, enc)
 }
 
 // RequireOwnerOnly reports whether path is readable by anyone but its owner. Nothing in
@@ -97,7 +130,10 @@ func checkKeyInfo(fi os.FileInfo) error {
 	return nil
 }
 
-func read(path string, size int) ([]byte, error) {
+// read reads and validates an existing key file. It never creates one, and it never
+// re-opens by path: openKey hands back an already-verified descriptor, and everything
+// below reads from that descriptor alone.
+func read(path string, size int, enc Encoding) ([]byte, error) {
 	f, fi, err := openKey(path)
 	if err != nil {
 		return nil, err
@@ -106,15 +142,36 @@ func read(path string, size int) ([]byte, error) {
 	if err := checkKeyInfo(fi); err != nil {
 		return nil, err
 	}
-	raw, err := io.ReadAll(f)
+	// Bounded because this is the package that loads long-lived secrets, and a corrupt or
+	// attacker-controlled file would otherwise be pulled into memory whole before any
+	// decode or size check could refuse it. The cap comes from size rather than a round
+	// number: hex is the widest of the three encodings at two characters per byte, and
+	// the slack covers a trailing newline, a CRLF, or an editor's blank last line.
+	limit := 2*size + 64
+	raw, err := io.ReadAll(io.LimitReader(f, int64(limit)+1))
 	if err != nil {
 		return nil, err
 	}
-	key, err := hex.DecodeString(strings.TrimSpace(string(raw)))
+	if len(raw) > limit {
+		// Left where it was found, like every other unreadable file here.
+		// TestReadRefusesAnOversizedFileWithoutTouchingIt holds that.
+		return nil, fmt.Errorf("%w: %s is larger than %d bytes", ErrUnreadable, path, limit)
+	}
+	key, err := enc.decode(raw)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %s: not hex", ErrUnreadable, path)
+		if enc == Hex {
+			// hex.InvalidByteError prints the offending byte. For a raw key misread as
+			// hex, that byte is almost always byte 0 of the actual secret — keep this
+			// message content-free so it never ends up in a startup log.
+			return nil, fmt.Errorf("%w: %s: not hex", ErrUnreadable, path)
+		}
+		// base64.CorruptInputError is positional only; it carries no key content.
+		return nil, fmt.Errorf("%w: %s: %w", ErrUnreadable, path, err)
 	}
 	if len(key) != size {
+		// Left untouched on purpose. A file that does not decode to the expected size is
+		// not a file to overwrite: it is either someone else's key or a truncated write,
+		// and replacing it orphans everything encrypted under the original.
 		return nil, fmt.Errorf("%w: %s holds %d bytes, expected %d", ErrUnreadable, path, len(key), size)
 	}
 	return key, nil
@@ -158,7 +215,7 @@ var writeAll = func(f *os.File, s string) error {
 // short write or a full disk left partial hex at the real path — and because this package
 // refuses to replace an unreadable key, that partial file is permanent until someone
 // deletes it by hand.
-func create(path string, size int) ([]byte, error) {
+func create(path string, size int, enc Encoding) ([]byte, error) {
 	key := make([]byte, size)
 	if _, err := randRead(key); err != nil {
 		return nil, fmt.Errorf("keyfile: %w", err)
@@ -181,7 +238,7 @@ func create(path string, size int) ([]byte, error) {
 	if err := tmp.Chmod(0600); err != nil {
 		return nil, fmt.Errorf("keyfile: %w", err)
 	}
-	if err := writeAll(tmp, hex.EncodeToString(key)); err != nil {
+	if err := writeAll(tmp, string(enc.encode(key))); err != nil {
 		return nil, fmt.Errorf("keyfile: %w", err)
 	}
 	// Without the fsync a crash here leaves a zero-length file that the next boot reads

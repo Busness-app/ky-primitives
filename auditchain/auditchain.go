@@ -67,7 +67,7 @@ type Anchor struct {
 // The lock is a channel rather than a sync.Mutex because persist runs while it is held,
 // and a sync.Mutex cannot be waited on with a deadline. A store that hangs therefore owned
 // the chain outright: every later append, and every Anchor(), blocked on it forever with
-// no way to shed. AppendContext lets a waiter give up.
+// no way to shed. Append takes a context.Context so a waiter can give up.
 type Chain struct {
 	lock  chan struct{}
 	key   []byte
@@ -117,20 +117,14 @@ func Resume(key []byte, last Record, anchor Anchor) (*Chain, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !validHash(last.Hash) || !validHash(last.Prev) {
-		return nil, fmt.Errorf("%w: record %d carries a hash that is not 64 lowercase hex characters", ErrBrokenChain, last.Seq)
+	if err := VerifyRecord(c.key, last); err != nil {
+		return nil, err
 	}
 	// Append mints count+1, so the top of the range wraps the next record to zero — which
-	// persists cleanly and can never verify. Zero is the other end: Append starts at one,
-	// so no record legitimately carries it.
-	if last.Seq == 0 {
-		return nil, fmt.Errorf("%w: record carries sequence 0, which no append mints", ErrBrokenChain)
-	}
+	// persists cleanly and can never verify. VerifyRecord already refused the other end,
+	// sequence 0, since no append mints it either.
 	if last.Seq == math.MaxUint64 {
 		return nil, fmt.Errorf("%w: record %d leaves no room for another append", ErrBrokenChain, last.Seq)
-	}
-	if !hmac.Equal([]byte(digest(c.key, last.Seq, last.Prev, last.Fields)), []byte(last.Hash)) {
-		return nil, fmt.Errorf("%w: record %d does not carry its own digest", ErrBrokenChain, last.Seq)
 	}
 	if anchor.Count != last.Seq || !hmac.Equal([]byte(anchor.Hash), []byte(last.Hash)) {
 		return nil, fmt.Errorf("%w: anchor is %d/%s but the record is %d/%s, so this is not the tail",

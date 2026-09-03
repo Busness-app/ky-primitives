@@ -147,8 +147,14 @@ func TestNeedsRehash(t *testing.T) {
 		t.Fatal("a hash below the current parameters does not want a rehash")
 	}
 
-	if _, err := NeedsRehash("garbage"); err == nil {
-		t.Fatal("NeedsRehash accepted a malformed hash")
+	// A hash this package did not write is not stale, it is not ours: no error, no
+	// rehash. Verify still refuses "garbage" outright.
+	need, err = NeedsRehash("garbage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if need {
+		t.Fatal("NeedsRehash flagged a foreign format as wanting a rehash")
 	}
 }
 

@@ -16,13 +16,13 @@ func TestSealOpenRoundTrip(t *testing.T) {
 		{Path: "keys/signing.pem", Content: bytes.Repeat([]byte("k"), 4096), Mode: 0600},
 	}
 
-	raw, key, err := capsule.Seal("fixture", "0.0.0", want, nil, nil, 2, 3)
+	raw, key, _, err := capsule.Seal("fixture", "0.0.0", want, nil, nil, 2, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	dir := filepath.Join(t.TempDir(), "restore")
-	got, err := capsule.Open(raw, key, dir)
+	_, got, err := capsule.Open(raw, key, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestSealOpenRoundTrip(t *testing.T) {
 
 // kycap/2 binds the manifest into the AEAD, and is the only container this package knows.
 func TestSealWritesKycap2(t *testing.T) {
-	raw, _, err := capsule.Seal("fixture", "0.0.0",
+	raw, _, _, err := capsule.Seal("fixture", "0.0.0",
 		[]capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}, nil, nil, 2, 3)
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +82,7 @@ func TestSealWritesKycap2(t *testing.T) {
 }
 
 func TestSealRefusesEmptyCapsule(t *testing.T) {
-	if _, _, err := capsule.Seal("x", "0", nil, nil, nil, 2, 3); err == nil {
+	if _, _, _, err := capsule.Seal("x", "0", nil, nil, nil, 2, 3); err == nil {
 		t.Fatal("sealed a capsule with no files")
 	}
 }
@@ -91,9 +91,51 @@ func TestSealRefusesEmptyCapsule(t *testing.T) {
 // package would then refuse to extract.
 func TestSealRefusesUnsafePaths(t *testing.T) {
 	for _, p := range []string{"../escape.txt", "/etc/passwd", ".."} {
-		if _, _, err := capsule.Seal("x", "0",
+		if _, _, _, err := capsule.Seal("x", "0",
 			[]capsule.File{{Path: p, Content: []byte("x"), Mode: 0600}}, nil, nil, 2, 3); err == nil {
 			t.Errorf("sealed a capsule containing %q", p)
 		}
+	}
+}
+
+// Seal's third return is the manifest that went into the AEAD, not a second construction
+// of it: re-encoding it reproduces the container's manifest bytes exactly, and those bytes
+// are the AAD. gridlock-server used to read CapsuleID, CreatedAt and PayloadHash back out
+// of its own output through ReadUnverifiedManifest — the keyless reader whose doc comment
+// says not to decide on what it returns — because Seal did not hand them back.
+func TestSealReturnsTheManifestItSealed(t *testing.T) {
+	files := []capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}
+
+	raw, key, m, err := capsule.Seal("fixture", "0.0.0", files, nil, nil, 2, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var container struct {
+		Manifest json.RawMessage `json:"manifest"`
+	}
+	if err := json.Unmarshal(raw, &container); err != nil {
+		t.Fatal(err)
+	}
+	got, err := json.Marshal(m.UnverifiedManifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, container.Manifest) {
+		t.Fatalf("Seal returned a manifest that is not the sealed one:\n got %s\nwant %s", got, container.Manifest)
+	}
+
+	// And Open, the only other producer of a Manifest, agrees on the fields Seal alone
+	// mints. A caller has no other source for these.
+	opened, _, err := capsule.Open(raw, key, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opened.CapsuleID != m.CapsuleID || opened.PayloadHash != m.PayloadHash || !opened.CreatedAt.Equal(m.CreatedAt) {
+		t.Fatalf("Open disagrees with Seal: %+v vs %+v", opened.UnverifiedManifest, m.UnverifiedManifest)
+	}
+	if opened.Threshold != m.Threshold || opened.TotalShares != m.TotalShares {
+		t.Fatalf("Open reports %d-of-%d, Seal returned %d-of-%d",
+			opened.Threshold, opened.TotalShares, m.Threshold, m.TotalShares)
 	}
 }

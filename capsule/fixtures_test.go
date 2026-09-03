@@ -2,6 +2,7 @@ package capsule_test
 
 import (
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,7 +26,7 @@ func TestOpensEveryPersistedCapsule(t *testing.T) {
 		t.Run(filepath.Base(p), func(t *testing.T) {
 			raw, key := loadFixture(t, p)
 
-			files, err := capsule.Open(raw, key, filepath.Join(t.TempDir(), "restore"))
+			_, files, err := capsule.Open(raw, key, filepath.Join(t.TempDir(), "restore"))
 			if err != nil {
 				t.Fatalf("a capsule written by an earlier version of this package failed to open: %v", err)
 			}
@@ -47,10 +48,40 @@ func TestOpenRejectsWrongKey(t *testing.T) {
 			raw, key := loadFixture(t, p)
 			key[0] ^= 0xFF
 
-			if _, err := capsule.Open(raw, key, ""); err == nil {
+			if _, _, err := capsule.Open(raw, key, ""); err == nil {
 				t.Fatal("a capsule opened with the wrong key")
 			}
 		})
+	}
+}
+
+// The README tells a caller to errors.Is a failed Open against ErrCorruptCapsule to tell a
+// malformed container from a bad key. A wrong key fails at AES-GCM's tag check, which
+// wraps its own error, not ErrCorruptCapsule — pin that half of the distinction here, since
+// it is exactly the kind of thing a refactor reverses silently.
+func TestOpenRejectsWrongKeyWithoutErrCorruptCapsule(t *testing.T) {
+	for _, p := range fixturePaths(t) {
+		t.Run(filepath.Base(p), func(t *testing.T) {
+			raw, key := loadFixture(t, p)
+			key[0] ^= 0xFF
+
+			_, _, err := capsule.Open(raw, key, "")
+			if err == nil {
+				t.Fatal("a capsule opened with the wrong key")
+			}
+			if errors.Is(err, capsule.ErrCorruptCapsule) {
+				t.Fatalf("a wrong key was reported as ErrCorruptCapsule: %v", err)
+			}
+		})
+	}
+}
+
+// The other half: a malformed container — here, a manifest field that is not the object
+// Open expects — does wrap ErrCorruptCapsule. It never reaches AES-GCM at all.
+func TestOpenReportsAnUnreadableManifestAsErrCorruptCapsule(t *testing.T) {
+	raw := []byte(`{"format":"kycap/2","manifest":"not an object","ciphertext":"AAAA"}`)
+	if _, _, err := capsule.Open(raw, make([]byte, 32), ""); !errors.Is(err, capsule.ErrCorruptCapsule) {
+		t.Fatalf("got %v, want ErrCorruptCapsule for an unreadable manifest", err)
 	}
 }
 
@@ -61,7 +92,7 @@ func TestOpenRejectsTamperedContainer(t *testing.T) {
 			raw, key := loadFixture(t, p)
 			raw[len(raw)/2] ^= 0xFF
 
-			if _, err := capsule.Open(raw, key, ""); err == nil {
+			if _, _, err := capsule.Open(raw, key, ""); err == nil {
 				t.Fatal("a tampered capsule opened cleanly")
 			}
 		})
@@ -78,7 +109,7 @@ func TestOpenRejectsRetiredContainers(t *testing.T) {
 		"tar":     append([]byte("manifest.json\x00"), make([]byte, 1024)...),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := capsule.Open(raw, make([]byte, 32), ""); err == nil {
+			if _, _, err := capsule.Open(raw, make([]byte, 32), ""); err == nil {
 				t.Fatalf("a retired %s container opened", name)
 			}
 		})
@@ -93,7 +124,7 @@ func TestOpenRejectsUnknownContainer(t *testing.T) {
 		"wrong json": []byte(`{"format":"kycap/99","manifest":{},"ciphertext":"AAAA"}`),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := capsule.Open(raw, make([]byte, 32), ""); err == nil {
+			if _, _, err := capsule.Open(raw, make([]byte, 32), ""); err == nil {
 				t.Fatalf("%q opened as a capsule", name)
 			}
 		})

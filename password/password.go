@@ -85,8 +85,11 @@ var (
 // ponytail: fixed budgets and wait. Make them configurable if a deployment needs a
 // different ceiling.
 const (
-	// budgetKiB is the total memory all concurrent derivations may reserve, equal to
-	// four derivations at the default 64 MiB.
+	// budgetKiB is the total memory all concurrent request-driven derivations may
+	// reserve, equal to four derivations at the default 64 MiB. One exception: the
+	// once-per-process dummy mint in dummyHash bypasses this budget entirely, so the
+	// process can transiently run one 64 MiB derivation beyond it — once, ever. See
+	// dummyHash for why.
 	//
 	// It is a byte budget rather than a slot count because slots bound how many
 	// derivations run, not how large they are, and Verify accepts a stored hash asking
@@ -107,6 +110,21 @@ const (
 	budgetLanes = 4 * defaultThreads
 
 	maxWait = 2 * time.Second
+)
+
+// MaxMemoryKiB and MaxLanes are the two dimensions of this package's derivation budget,
+// taken together under one acquirer so two waiters can never each hold part of what the
+// other needs. They are exported so a product running derive as well can add the two
+// budgets up rather than assume one of them is the whole story. Memory is in KiB, matching
+// Params.Memory and every other memory value in this package.
+//
+// Both are derived from unexported constants, which keeps them from drifting apart, but
+// also keeps the number out of godoc for anyone reading pkg.go.dev rather than the source.
+// Stated here so it doesn't have to be: MaxMemoryKiB is currently 262144 KiB (256 MiB);
+// MaxLanes is currently 16.
+const (
+	MaxMemoryKiB = budgetKiB
+	MaxLanes     = budgetLanes
 )
 
 // Two dimensions, one queue. Memory is what OOM-kills a process and lanes are what starve
@@ -242,11 +260,65 @@ func Hash(plaintext string) (string, error) {
 	return hashWith(plaintext, DefaultParams())
 }
 
+const dummyPlaintext = "dummy verification plaintext"
+
+// dummyHashMu guards dummyHashValue, a mutex-guarded memo rather than sync.OnceValue: a
+// OnceValue that panics caches the panic and re-raises it on every later call forever. If
+// dummyMint ever panics, the assignment below never completes, so dummyHashValue stays
+// unset and the next call retries — nothing here caches a failure.
+var (
+	dummyHashMu    sync.Mutex
+	dummyHashValue string
+)
+
+// dummyHash mints the dummy hash once, on first use, at the current parameters — so
+// DummyVerify costs what a real verification costs even after those parameters move.
+//
+// Minted through dummyMint, which bypasses withBudget: this derivation runs once per
+// process, not once per request, so it is not the concurrent load admission control exists
+// to bound. Going through the budget meant a single transient ErrBusy on the first-ever
+// call would be cached forever by sync.OnceValue, bricking DummyVerify — with no benefit,
+// since one extra process-lifetime derivation was never what the budget needed to cap.
+func dummyHash() string {
+	dummyHashMu.Lock()
+	defer dummyHashMu.Unlock()
+	if dummyHashValue == "" {
+		dummyHashValue = dummyMint()
+	}
+	return dummyHashValue
+}
+
+// DummyVerify spends the cost of a verification and reports nothing.
+//
+// A login that answers "no such account" faster than "wrong password" enumerates accounts.
+// Call this on every reject path that did not reach a real Verify, so the two cost the
+// same.
+//
+// It is not perfect and should not be sold as such: Verify can return ErrBusy without
+// deriving anything, and that path is fast. Under load the oracle reopens. Shedding is
+// still the right answer to overload — just do not describe this as constant time. The
+// first call in a process additionally mints the dummy hash, so it costs roughly two
+// derivations rather than one; every call after that costs one.
+func DummyVerify() {
+	_, _ = Verify(dummyPlaintext, dummyHash())
+}
+
+// HashWith derives a PHC-encoded Argon2id hash at the given parameters.
+//
+// Hash is the suite's answer and what production code should call. This exists for two
+// callers: a test suite that cannot afford 64 MiB per derivation, and a product that must
+// mint at parameters an existing deployment already uses. Parameters are bounded to the
+// band Verify accepts, so this cannot mint a hash that verifies nowhere — but it can mint
+// a weaker one than the suite standard, and that is the caller's responsibility.
+func HashWith(plaintext string, p Params) (string, error) {
+	return hashWith(plaintext, p)
+}
+
 func hashWith(plaintext string, p Params) (string, error) {
 	if plaintext == "" {
 		return "", errors.New("password: refusing to hash an empty password")
 	}
-	if err := p.validate(); err != nil {
+	if err := p.Validate(); err != nil {
 		return "", err
 	}
 	salt := make([]byte, saltBytes)
@@ -259,9 +331,28 @@ func hashWith(plaintext string, p Params) (string, error) {
 	}); err != nil {
 		return "", err
 	}
+	return encode(p, salt, key), nil
+}
+
+// dummyMint derives the dummy hash at the current default parameters without acquiring the
+// budget. See dummyHash for why: this runs once per process, not once per request.
+//
+// No error return: crypto/rand.Read cannot produce a non-nil error on this module's Go
+// floor (1.26.6) without already having crashed the process via runtime.fatal (broken
+// entropy source, since Go 1.24) — there is no error state left for a caller to handle.
+func dummyMint() string {
+	p := DefaultParams()
+	salt := make([]byte, saltBytes)
+	_, _ = rand.Read(salt)
+	key := argon2.IDKey([]byte(dummyPlaintext), salt, p.Time, p.Memory, p.Threads, keyBytes)
+	return encode(p, salt, key)
+}
+
+// encode renders the PHC string for a derived key at p.
+func encode(p Params, salt, key []byte) string {
 	return "$argon2id$" + versionSegment + "$" + p.segment() + "$" +
 		base64.RawStdEncoding.EncodeToString(salt) + "$" +
-		base64.RawStdEncoding.EncodeToString(key), nil
+		base64.RawStdEncoding.EncodeToString(key)
 }
 
 // Verify reports whether plaintext produced encoded. A malformed or out-of-bounds stored
@@ -282,10 +373,20 @@ func Verify(plaintext, encoded string) (bool, error) {
 
 // NeedsRehash reports whether a stored hash was made below the current parameters, so a
 // deployment can upgrade it on the next successful login.
+//
+// A hash this package did not write — malformed, foreign, or otherwise unparseable — is not
+// stale, it is not ours: this reports false rather than guessing. Verify still refuses a
+// foreign hash outright.
+//
+// The error return is currently always nil. It is kept for signature stability: several
+// migration plans are already written against (bool, error).
 func NeedsRehash(encoded string) (bool, error) {
 	p, _, _, err := parse(encoded)
 	if err != nil {
-		return false, err
+		// A hash this package did not write is not stale — it is not ours. Rehashing on a
+		// guess is how a product ends up re-minting a format it cannot read. Verify still
+		// refuses it outright; that is where a malformed hash must be an error.
+		return false, nil
 	}
 	d := DefaultParams()
 	return p.Memory < d.Memory || p.Time < d.Time || p.Threads != d.Threads, nil
@@ -324,7 +425,7 @@ func parseParams(segment string) (Params, error) {
 	if canonical := p.segment(); canonical != segment {
 		return Params{}, fmt.Errorf("%w: parameter segment %q is not canonical, want %q", ErrMalformed, segment, canonical)
 	}
-	return p, p.validate()
+	return p, p.Validate()
 }
 
 // segment renders the canonical parameter spelling.
@@ -332,7 +433,11 @@ func (p Params) segment() string {
 	return fmt.Sprintf("m=%d,t=%d,p=%d", p.Memory, p.Time, p.Threads)
 }
 
-func (p Params) validate() error {
+// Validate reports whether these parameters are inside the band a stored hash may carry.
+//
+// The band is parse's, not a second opinion: minting something Verify would refuse is a
+// hash that works nowhere, which is a worse failure than being told no.
+func (p Params) Validate() error {
 	switch {
 	case p.Memory < minMemory || p.Memory > maxMemory:
 		return fmt.Errorf("%w: memory %d KiB is outside %d-%d", ErrMalformed, p.Memory, minMemory, maxMemory)

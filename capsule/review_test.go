@@ -4,10 +4,13 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -48,8 +51,41 @@ func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 		for i := range files {
 			files[i] = File{Path: fmt.Sprintf("f%05d", i), Content: []byte("x"), Mode: 0600}
 		}
-		if _, _, err := Seal("t", "1", files, nil, nil, 2, 3); !errors.Is(err, ErrCapsuleTooLarge) {
+		if _, _, _, err := Seal("t", "1", files, nil, nil, 2, 3); !errors.Is(err, ErrCapsuleTooLarge) {
 			t.Fatalf("got %v, want ErrCapsuleTooLarge", err)
+		}
+	})
+
+	// Under the file count and under every size limit, but the manifest is past
+	// maxManifestBytes. Seal used to return a key for this container and both readers then
+	// refused it forever. Nothing bounds the recipe, so it is the growth path that stays
+	// once the file list has moved into the payload.
+	t.Run("manifest past what parseContainer permits", func(t *testing.T) {
+		recipe := map[string]any{"steps": strings.Repeat("s", maxManifestBytes)}
+		files := []File{{Path: "a.txt", Content: []byte("x"), Mode: 0600}}
+		_, _, _, err := Seal("t", "1", files, nil, recipe, 2, 3)
+		if !errors.Is(err, ErrCapsuleTooLarge) {
+			t.Fatalf("got %v, want ErrCapsuleTooLarge", err)
+		}
+		if !strings.Contains(err.Error(), "manifest") {
+			t.Fatalf("got %v, want the manifest bound", err)
+		}
+	})
+
+	// The same growth, now in the file list: nothing bounds a caller's path lengths, and
+	// the list is the payload member Open reads under maxFileListBytes. Seal must refuse
+	// what Open would refuse here too.
+	t.Run("file list past what Open permits", func(t *testing.T) {
+		files := make([]File, maxCapsuleFiles)
+		for i := range files {
+			files[i] = File{Path: fmt.Sprintf("%04d", i) + strings.Repeat("p", 196), Content: []byte("x"), Mode: 0600}
+		}
+		_, _, _, err := Seal("t", "1", files, nil, nil, 2, 3)
+		if !errors.Is(err, ErrCapsuleTooLarge) {
+			t.Fatalf("got %v, want ErrCapsuleTooLarge", err)
+		}
+		if !strings.Contains(err.Error(), "file list") {
+			t.Fatalf("got %v, want the file-list bound", err)
 		}
 	})
 
@@ -58,11 +94,11 @@ func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 		for i := range files {
 			files[i] = File{Path: fmt.Sprintf("f%05d", i), Content: []byte("x"), Mode: 0600}
 		}
-		raw, key, err := Seal("t", "1", files, nil, nil, 2, 3)
+		raw, key, _, err := Seal("t", "1", files, nil, nil, 2, 3)
 		if err != nil {
 			t.Fatalf("the limit itself was refused: %v", err)
 		}
-		got, err := Open(raw, key, "")
+		_, got, err := Open(raw, key, "")
 		if err != nil {
 			t.Fatalf("Open refused a capsule Seal wrote: %v", err)
 		}
@@ -70,6 +106,54 @@ func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 			t.Fatalf("round tripped %d files, want %d", len(got), maxCapsuleFiles)
 		}
 	})
+}
+
+// The manifest used to record the caller's raw path and mode while buildPayload wrote the
+// normalised name and the owner-only clamp. A per-file digest check keyed on the manifest
+// path then matched no file, and the published mode was one extraction deliberately
+// refuses to apply.
+func TestManifestEntriesDescribeWhatExtractionProduces(t *testing.T) {
+	files := []File{
+		{Path: "./a.txt", Content: []byte("a"), Mode: 0o644},
+		{Path: "d//e/../e/f.txt", Content: []byte("f"), Mode: 0o777},
+	}
+	raw, key, m, err := Seal("t", "1", files, nil, nil, 2, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m.Files[0].Path; got != "a.txt" {
+		t.Errorf("manifest path %q, want %q", got, "a.txt")
+	}
+	if got := m.Files[0].Mode; got != 0o600 {
+		t.Errorf("manifest mode %04o, want 0600", got)
+	}
+	if got := m.Files[1].Path; got != "d/e/f.txt" {
+		t.Errorf("manifest path %q, want %q", got, "d/e/f.txt")
+	}
+	if got := m.Files[1].Mode; got != 0o700 {
+		t.Errorf("manifest mode %04o, want 0700", got)
+	}
+
+	_, opened, err := Open(raw, key, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byPath := make(map[string]File, len(opened))
+	for _, f := range opened {
+		byPath[f.Path] = f
+	}
+	for _, e := range m.Files {
+		f, ok := byPath[e.Path]
+		if !ok {
+			t.Fatalf("manifest names %q, Open returned no such file", e.Path)
+		}
+		if sum := sha256.Sum256(f.Content); hex.EncodeToString(sum[:]) != e.Sum {
+			t.Errorf("%q: digest does not match the file Open returned", e.Path)
+		}
+		if f.Mode != e.Mode {
+			t.Errorf("%q: manifest mode %04o, extracted mode %04o", e.Path, e.Mode, f.Mode)
+		}
+	}
 }
 
 // Two paths that normalise to one destination produced a capsule whose second member
@@ -83,7 +167,7 @@ func TestSealRefusesPathsThatCollideAfterNormalisation(t *testing.T) {
 		{"d/e", "d/../d/e"},
 	} {
 		t.Run(paths[0]+" vs "+paths[1], func(t *testing.T) {
-			_, _, err := Seal("t", "1", []File{
+			_, _, _, err := Seal("t", "1", []File{
 				{Path: paths[0], Content: []byte("first"), Mode: 0600},
 				{Path: paths[1], Content: []byte("second"), Mode: 0600},
 			}, nil, nil, 2, 3)
@@ -95,10 +179,15 @@ func TestSealRefusesPathsThatCollideAfterNormalisation(t *testing.T) {
 }
 
 func TestSealRefusesAnOversizedMember(t *testing.T) {
-	// Not allocated: the check is on the declared length, which is what Open bounds too.
-	big := File{Path: "big", Content: make([]byte, 0), Mode: 0600}
-	if _, _, err := Seal("t", "1", []File{big}, nil, nil, 2, 3); err != nil {
-		t.Fatalf("an empty member was refused: %v", err)
+	// buildPayload measures int64(len(f.Content)) directly, so unlike extraction -- which
+	// bounds a declared hdr.Size from an attacker-controlled tar header -- there is no
+	// declared length to lie about here. Exercising the check needs a real allocation over
+	// maxCapsuleFileBytes.
+	content := make([]byte, maxCapsuleFileBytes+1)
+	_, _, _, err := Seal("t", "1", []File{{Path: "big", Content: content, Mode: 0600}}, nil, nil, 2, 3)
+	content = nil
+	if !errors.Is(err, ErrCapsuleTooLarge) {
+		t.Fatalf("got %v, want ErrCapsuleTooLarge", err)
 	}
 }
 
@@ -109,7 +198,7 @@ func TestAFailedExtractionLeavesNothingBehind(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "restore")
 	payload := payloadFailingPartway(t)
 
-	if _, err := extractPayload(payload, target); !errors.Is(err, ErrCapsuleEntryType) {
+	if _, _, err := extractPayload(payload, target); !errors.Is(err, ErrCapsuleEntryType) {
 		t.Fatalf("got %v, want ErrCapsuleEntryType", err)
 	}
 
@@ -123,11 +212,11 @@ func TestAFailedExtractionLeavesNothingBehind(t *testing.T) {
 	}
 
 	// A retry must succeed rather than hit ErrTargetNotEmpty.
-	raw, key, err := Seal("t", "1", []File{{Path: "a.txt", Content: []byte("ok"), Mode: 0600}}, nil, nil, 2, 3)
+	raw, key, _, err := Seal("t", "1", []File{{Path: "a.txt", Content: []byte("ok"), Mode: 0600}}, nil, nil, 2, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(raw, key, target); err != nil {
+	if _, _, err := Open(raw, key, target); err != nil {
 		t.Fatalf("retry after a failed restore: %v", err)
 	}
 }
@@ -146,13 +235,13 @@ func TestExtractionCannotEscapeThroughASymlinkedParent(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	raw, key, err := Seal("t", "1", []File{
+	raw, key, _, err := Seal("t", "1", []File{
 		{Path: "sub/stolen.txt", Content: []byte("secret"), Mode: 0600},
 	}, nil, nil, 2, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(raw, key, target); err == nil {
+	if _, _, err := Open(raw, key, target); err == nil {
 		t.Fatal("extracted into a target holding a symlinked parent")
 	}
 	if _, err := os.Stat(filepath.Join(outside, "stolen.txt")); err == nil {
@@ -177,7 +266,7 @@ func TestExtractRejectsPathsThatCollideAfterNormalisation(t *testing.T) {
 			name = "into a target directory"
 		}
 		t.Run(name, func(t *testing.T) {
-			if _, err := extractPayload(payload, target); !errors.Is(err, ErrDuplicatePath) {
+			if _, _, err := extractPayload(payload, target); !errors.Is(err, ErrDuplicatePath) {
 				t.Fatalf("got %v, want ErrDuplicatePath", err)
 			}
 		})
