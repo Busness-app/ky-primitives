@@ -507,10 +507,14 @@ record, and unbounded it buys minutes of CPU per login.
 
 The two products do not agree on the ceiling, and this package takes the looser of them.
 `kypost-server` enforces 12,000,000 with nothing tighter in front of it. `kynotes-server`'s
-derivation carries the same 12,000,000, but every route that accepts an iteration count from
-a client caps it at 1,000,000 first, so what it admits is 12x smaller. **Adopting this
-package as the only bound raises kynotes' effective ceiling twelvefold.** Which number is
-right is an open product decision; keep the tighter route check until it is made.
+derivation carries the same 12,000,000, and four of its five routes that accept a client
+iteration count cap it below that — one clamps an out-of-range value to 600,000 rather
+than refusing it, the other three refuse anything outside 100,000-1,000,000. Its fifth
+route, account recovery, checks the client's count only through the derivation's own
+100,000-12,000,000 bound, so kynotes does admit the full ceiling, just not on every route.
+**Adopting this package as the only bound would raise those four routes' ceiling
+twelvefold.** Which number is right is an open product decision; keep their tighter
+checks until it is made.
 
 A ceiling is not admission control, though — it bounds one call and says nothing about how
 many run at once, so a modest burst at the ceiling takes every core and starves the handlers

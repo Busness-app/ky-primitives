@@ -122,7 +122,7 @@ func TestAuthSecretRejectsBadParameters(t *testing.T) {
 
 // A caller that forgets to bound iterations lets a stored or client-supplied value ask
 // for hours of CPU per login. The bounds are the reason this is a package and not a call.
-func TestIterationBoundsAreTheOnesTheSuiteAgreedOn(t *testing.T) {
+func TestIterationBoundsHaveNotDrifted(t *testing.T) {
 	if MinIterations != 100000 {
 		t.Errorf("MinIterations is %d", MinIterations)
 	}

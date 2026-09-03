@@ -122,14 +122,19 @@ const (
 	// The two products do not agree on the ceiling, and this constant takes the looser
 	// of the two. kypost-server enforces 12,000,000 and nothing tighter sits in front of
 	// it (users.MaxLoginIterations, checked in login_params.go). kynotes-server's
-	// derivation carries the same 12,000,000 (auth.MaxLoginIterations), but every route
-	// that accepts an iteration count from a client refuses anything over 1,000,000
-	// first — httpapi/auth_routes.go:80,227 and admin_routes.go:135,246 — so what
-	// kynotes actually admits is 12x smaller than what this package admits.
+	// derivation carries the same 12,000,000 (auth.MaxLoginIterations), and four of its
+	// five routes that accept a client iteration count cap it below that: registration
+	// silently clamps an out-of-range value to 600,000 rather than refusing it
+	// (httpapi/auth_routes.go:80), and password change, admin user creation, and admin
+	// password reset each refuse anything outside 100,000-1,000,000
+	// (auth_routes.go:227, admin_routes.go:135,246). The fifth, account recovery
+	// (auth_routes.go:264), checks the client's count only through
+	// auth.DeriveAuthSecret's own 100,000-12,000,000 bound and stores what it is given —
+	// so kynotes does admit the full 12,000,000, just not on every route.
 	//
 	// Which ceiling is right is unresolved, and it is a product decision rather than a
-	// library one. Adopting this package as the only bound raises kynotes' effective
-	// ceiling 12-fold; keep the tighter route check until that call is made.
+	// library one. Adopting this package as the only bound would raise those four
+	// routes' ceiling 12-fold; keep their tighter checks until that call is made.
 	//
 	// The cross-repo line numbers above are evidence this module cannot execute — it has
 	// no access to those repositories. What it can pin is its own pair of numbers, so

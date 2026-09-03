@@ -44,7 +44,7 @@ type UnverifiedManifest struct {
 	VerificationRecipe any `json:"verification_recipe,omitempty"`
 }
 
-// Manifest is a capsule's manifest, authenticated. Only Open returns one.
+// Manifest is a capsule's manifest, authenticated. Only a successful Open or Seal returns one.
 //
 // The embedded field is not an accident: a Manifest can be read wherever the fields are
 // wanted, but an UnverifiedManifest cannot be passed where a Manifest is required.
