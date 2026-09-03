@@ -81,12 +81,13 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 	if err != nil {
 		return nil, nil, Manifest{}, err
 	}
-	// The last limit Open enforces that sealing can reach. Files is the only manifest
-	// component that grows with caller input, and nothing bounds a path's length, so
-	// enough long-named members push the manifest past what parseContainer accepts. Seal
-	// used to return a key for that container and every later read of it failed with
-	// ErrCorruptCapsule — a backup that cannot be restored, found at restore time.
-	// TestSealRefusesWhatOpenWouldRefuse holds this.
+	// The last limit Open enforces that sealing can reach. The manifest grows with caller
+	// input in several places — Files, deps, recipe, and the version strings — and none of
+	// them is individually bounded, which is why the whole marshalled manifest is what gets
+	// measured here rather than any one field. Seal used to return a key for an oversized
+	// manifest and every later read of it failed with ErrCorruptCapsule — a backup that
+	// cannot be restored, found at restore time. TestSealRefusesWhatOpenWouldRefuse holds
+	// this.
 	if len(manifestBytes) > maxManifestBytes {
 		return nil, nil, Manifest{}, fmt.Errorf("%w: manifest is %d bytes, Open permits %d", ErrCapsuleTooLarge, len(manifestBytes), maxManifestBytes)
 	}

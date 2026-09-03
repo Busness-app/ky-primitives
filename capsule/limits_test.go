@@ -1,6 +1,7 @@
 package capsule
 
 import (
+	"encoding/base64"
 	"testing"
 )
 
@@ -35,5 +36,21 @@ func TestExtractionBudgetsFitAServer(t *testing.T) {
 	// of them is edited.
 	if maxCapsuleFileBytes > maxCapsuleExpandedTotal {
 		t.Errorf("a single member may be %d bytes but the whole archive only %d", maxCapsuleFileBytes, maxCapsuleExpandedTotal)
+	}
+}
+
+// buildPayload's doc comment says every limit Open enforces is enforced here too, bar the
+// manifest bound Seal applies separately -- meaning maxContainerBytes, which parseContainer
+// enforces on the whole container and on the encoded ciphertext, can never be reached by a
+// container buildPayload produces. That holds only by arithmetic today: a
+// maxCapsuleExpandedTotal plaintext base64-expands to less than maxContainerBytes even
+// after adding a full maxManifestBytes manifest, with about 40 MiB to spare. Nothing in the
+// code enforces that margin, so this pins it: if a future edit to any of the four constants
+// closes the gap, this fails instead of buildPayload's doc comment silently going false.
+func TestContainerBoundExceedsWhatSealCanProduce(t *testing.T) {
+	encodedCiphertext := int64(base64.StdEncoding.EncodedLen(int(maxCapsuleExpandedTotal)))
+	if encodedCiphertext+maxManifestBytes >= int64(maxContainerBytes) {
+		t.Fatalf("base64(expanded total) %d + manifest bound %d = %d, at or past maxContainerBytes %d",
+			encodedCiphertext, int64(maxManifestBytes), encodedCiphertext+maxManifestBytes, maxContainerBytes)
 	}
 }

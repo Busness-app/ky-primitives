@@ -159,10 +159,15 @@ func TestSealRefusesPathsThatCollideAfterNormalisation(t *testing.T) {
 }
 
 func TestSealRefusesAnOversizedMember(t *testing.T) {
-	// Not allocated: the check is on the declared length, which is what Open bounds too.
-	big := File{Path: "big", Content: make([]byte, 0), Mode: 0600}
-	if _, _, _, err := Seal("t", "1", []File{big}, nil, nil, 2, 3); err != nil {
-		t.Fatalf("an empty member was refused: %v", err)
+	// buildPayload measures int64(len(f.Content)) directly, so unlike extraction -- which
+	// bounds a declared hdr.Size from an attacker-controlled tar header -- there is no
+	// declared length to lie about here. Exercising the check needs a real allocation over
+	// maxCapsuleFileBytes.
+	content := make([]byte, maxCapsuleFileBytes+1)
+	_, _, _, err := Seal("t", "1", []File{{Path: "big", Content: content, Mode: 0600}}, nil, nil, 2, 3)
+	content = nil
+	if !errors.Is(err, ErrCapsuleTooLarge) {
+		t.Fatalf("got %v, want ErrCapsuleTooLarge", err)
 	}
 }
 
