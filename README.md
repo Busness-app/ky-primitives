@@ -25,84 +25,73 @@ it is fixed in place rather than moved here.
 
 ## capsule
 
-Reads and writes the suite's encrypted backup containers.
+Reads and writes the suite's encrypted backup container.
 
-One container holds real recovery data on disk today:
-
-`kycap/2`: a JSON object holding the manifest, a base64 ciphertext with the
-nonce prefixed, and nothing else. The manifest is bound into the AEAD, so every field
-describing the capsule is authenticated rather than merely present. It is carried and
-authenticated as the exact bytes that were read, not a re-encoding of a decoded struct, so
-nothing depends on two encoders agreeing forever.
+`kycap/3`: a JSON object holding the manifest, a base64 ciphertext, and nothing else. The
+payload is sealed to the suite recovery public key through HPKE — X-Wing (ML-KEM-768 with
+X25519), HKDF-SHA256, AES-256-GCM — so `Seal` returns no key and a product that seals a
+backup holds nothing afterwards that opens it. The manifest is bound into the AEAD, so
+every field describing the capsule is authenticated rather than merely present, and it is
+carried and authenticated as the exact bytes that were read, not a re-encoding.
 
 The manifest carries what identifies a capsule — `capsule_id`, `service_name`,
-`created_at`, `payload_hash` and the recovery topology — and no more. The per-member list
-of paths, sizes and SHA-256 digests travels inside the encrypted payload instead, as a
-reserved member, because the manifest is stored in the clear: a per-member digest read
-without the key is an offline confirmation oracle over the key material a capsule holds,
-and two capsules sharing one would show a signing key was never rotated between backups.
-`Open` fills `Manifest.Files` from inside the payload after the payload hash verifies;
-`ReadUnverifiedManifest` returns none, which is the right answer for a keyless read. This
-is the layout change behind `v0.3.0` — a `v0.2.0` capsule still opens, and reports no
-files, because it never carried an authenticated list.
+`created_at`, `payload_hash`, the recovery topology, and two fields that name the key:
+`recovery_key_id` (the hex SHA-256 of the recovery public key) and `encapsulated_key` (the
+HPKE encapsulation, 1120 bytes base64). Neither is secret; both are inside the AAD.
+kyrecovery reads the key ID without any key to display it and to refuse a deposit sealed to
+a key it did not hand out. The per-member list of paths, sizes and SHA-256 digests travels
+inside the encrypted payload, as a reserved member, because the manifest is stored in the
+clear and a per-member digest read without the key is an offline confirmation oracle.
+`Open` fills `Manifest.Files` after the payload hash verifies; `ReadUnverifiedManifest`
+returns none.
 
-Two containers came before it and both are retired:
+`Open` compares the manifest's `recovery_key_id` with the key it was given before
+decapsulating anything, and fails with `ErrWrongRecoveryKey`: the custodians brought the
+wrong kit. That compare is a courtesy on unauthenticated data; the AEAD is the check, and a
+forged ID that matches the wrong key still fails there.
+
+Three containers came before it and all are retired unread:
 
 | Container | Was written by | Why it is gone |
 |---|---|---|
 | `kycap/1` | `kysignon-server` | Authenticated its ciphertext and nothing else |
 | tar | `kyrecovery-server` | Authenticated its ciphertext and its own `aad` string, not the rest of the manifest |
+| `kycap/2` | this package, before `v0.4.0` | Authenticated the manifest, then handed the caller a raw key to protect and split per capsule |
 
-In both, `capsule_id`, `service_name`, `threshold`, `total_shares` and the verification
-recipe were rewritable by anyone who could reach the file, without the key — a 2-of-3 kit
-could be restated as 1-of-1 and still open. Neither server needs its old capsules read, so
-the readers were retired rather than kept: a reader that half-trusts a manifest cannot tell
-its caller which half.
+In the first two, `capsule_id`, `service_name`, `threshold`, `total_shares` and the
+verification recipe were rewritable by anyone who could reach the file — a 2-of-3 kit
+could be restated as 1-of-1 and still open. In the third, every backup was a fresh key and
+so a fresh custodian ceremony, which no one runs nightly, so the key ended up stored next
+to the data it protected. Nothing is in the wild, so none of the three is read.
 
 `Seal` refuses a kit that cannot exist — `threshold` below 2, above `totalShares`, or a
 total past 255 — because a manifest that records recovery topology without checking it
 sends a custodian looking for shares that were never issued.
 
 ```go
-m, files, err := capsule.Open(raw, key, "/var/restore")
-raw, key, m, err := capsule.Seal(name, version, files, nil, nil, 2, 3)
+raw, m, err := capsule.Seal(name, version, files, nil, nil, 2, 3, pub)  // pub: recoverykey.PublicKey
+m, files, err := capsule.Open(raw, priv, "/var/restore")                // priv: recoverykey.PrivateKey
+m, files, err := capsule.Open(raw, priv, "")                            // decode only, writes nothing
+u, err := capsule.ReadUnverifiedManifest(raw)                           // no key; show, do not decide
 ```
 
 `Open` returns the manifest because a successful `Open` is the only proof it was not
-rewritten. `Seal` returns one too: `capsule_id`, `created_at` and `payload_hash` are minted
-inside `Seal` and have no other source, and without them on the return a caller had to
-re-parse its own output through `ReadUnverifiedManifest` to read fields it had just
-authored. `gridlock-server` did exactly that. `ReadUnverifiedManifest` reads a manifest
-without a key and returns a different type, `UnverifiedManifest`, so the compiler stops it
-reaching anything that decides on it — a threshold read without the key is a threshold
-anyone who can reach the file chose.
+rewritten. `Seal` returns one too: `capsule_id`, `created_at`, `payload_hash` and
+`encapsulated_key` are minted inside `Seal` and have no other source.
+`ReadUnverifiedManifest` returns a different type, `UnverifiedManifest`, so the compiler
+stops it reaching anything that decides on it.
 
-```go
-m, files, err := capsule.Open(raw, key, "/var/restore")   // authenticated
-m, files, err := capsule.Open(raw, key, "")               // decode only, writes nothing
-raw, key, m, err := capsule.Seal(name, ver, files, nil, nil, 2, 3) // the sealed manifest
-u, err := capsule.ReadUnverifiedManifest(raw)             // no key; show, do not decide
-```
+`errors.Is` a failed `Open` against `ErrWrongRecoveryKey` for the wrong kit, against
+`ErrUnknownContainer` for a retired or foreign format, and against `ErrCorruptCapsule` for
+a malformed container; an AEAD failure wraps none of them.
 
-`errors.Is` a failed `Open` against `ErrCorruptCapsule` to tell a malformed container from
-a bad key.
-
-The ciphertext field is standard base64 in and out. Decoding used to also accept raw-url,
-for capsules `ky_server_base` and `gridlock-server` encoded that way and never persisted;
-with one writer left, a second accepted spelling is only a second thing that has to stay
-true.
-
-`key` is raw bytes, never a hex string. The suite's implementations disagreed on that.
-Here the mistake is loud: `container.go` requires exactly 32 bytes, so the hex spelling of
-a 32-byte key is 64 bytes and is refused outright. It was silent in the implementations
-this replaced, which hashed or truncated whatever they were handed into 32 bytes and went
-on to decrypt garbage.
+The ciphertext field is standard base64 in and out.
 
 ### Extraction hardening
 
-Both containers decrypt to a gzipped tar, so one hardened extraction serves both. It is
-ported from `kysignon-server`, which carried the strongest version in the suite, and it
-means a `kyrecovery-server` capsule opened here gets checks its own `Unpack` never applied.
+The payload decrypts to a gzipped tar, extracted through this hardened path. It is ported
+from `kysignon-server`, which carried the strongest version in the suite — stronger than
+the checks `kyrecovery-server`'s own `Unpack` ever applied to its own format, now retired.
 
 Extraction runs through an `os.Root` handle, so every component resolves against a
 directory descriptor and no member can name a location outside the target. Containment
@@ -129,11 +118,39 @@ the constants rather than the refusal. An extraction-side test for both is outst
 
 ### Fixtures
 
-`testdata/capsules/` holds one real capsule from each persisted container, with the key
-that opens it. See the README there for why the keys are committed.
+`testdata/capsules/` holds one `kycap/3` capsule with the recovery seed that opens it, and
+under `retired/` the last `kycap/2` capsule, kept so `Open`'s refusal is measured against a
+real container. See the README there for why the seed is committed.
 
-`ky_server_base` and `gridlock-server` contribute no fixture because they persist no
-capsule at all — see `ky_server_base/docs/capsule-interop-findings.md`.
+## recoverykey
+
+The suite's recovery keypair: one public key every product seals its backups to, and the
+private key that exists only while it is being split into custodian shares and while a
+restore combines them.
+
+The KEM is X-Wing (ML-KEM-768 with X25519) through Go's `crypto/hpke`. A backup is the
+artefact most likely to still matter when a recorded ciphertext is attacked, so this is
+the one place the library pays for post-quantum security. Every `crypto/hpke` KEM rebuilds
+its private key from a 32-byte seed, and the seed is the only thing this package hands to
+`shamir`: a custodian card carries 32 bytes whatever the KEM.
+
+```go
+priv, err := recoverykey.Generate()                  // once, in kyrecovery's ceremony
+shares, err := recoverykey.Split(priv, 3, 5)         // shamir shares of the seed; print, then zero priv
+pub := priv.Public()                                 // hand pub.Bytes() to every product; pin pub.ID()
+
+pub, err := recoverykey.ParsePublicKey(b)            // in a product, from keyfile.Load
+priv, err := recoverykey.Combine(shares)             // at restore, from k custodian cards
+```
+
+`Generate` is called on exactly one host, once, and that host holds the seed in memory
+until `Split` returns. That is the one place in the suite the recovery private key exists
+outside custodian cards; the ceremony code must zero it and must never log or persist it.
+
+`ID()` is the hex SHA-256 of the public key. It is what a capsule names, what kyrecovery
+pins per product, and what a custodian writes on a card. `FromSeed` refuses any length but
+32; `ParsePublicKey` refuses any length but 1216. Pinned to the draft-ietf-hpke-pq X-Wing
+vector: that seed produces that public key, or the package is not X-Wing.
 
 ## shamir
 
@@ -546,7 +563,13 @@ package means the env-supplied key skips every check the file-supplied one gets.
 key, err := keyfile.LoadOrCreateEncoded(path, 32, keyfile.Base64)
 key, err := keyfile.Load(path, 32)                       // never creates
 key, ok, err := keyfile.FromEnv("KY_AUDIT_KEY", 32)       // ok is false when unset
+err := keyfile.Store(path, pub.Bytes(), keyfile.Raw)     // a key the caller was handed; never overwrites
 ```
+
+`Store` persists a key the caller already holds — the recovery public key received at
+pairing — and refuses to replace an existing file, with `errors.Is(err, fs.ErrExist)`.
+Replacing a product's recovery public key is how every later backup gets sealed to whoever
+wrote the replacement.
 
 A hex key file is lowercase hex with exactly one trailing newline — 65 bytes for a 32-byte
 key. That format is pinned by `TestHexFileFormat`.
