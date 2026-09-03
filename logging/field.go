@@ -201,17 +201,23 @@ var (
 // URL — so dropping the wrappers drops the leak. This is not airtight: a leaf built by
 // fmt.Errorf with no %w carries whatever the caller put in it. It removes the accidental
 // case, which is the one that happens.
+//
+// The unwrap loop is bounded at 100 iterations to guard against cyclic error chains,
+// which would otherwise hang the goroutine. Real wrap chains are under ten deep, so
+// 100 is a guard rather than a policy.
 func Err(err error) Field {
 	if err == nil {
 		return Field{}
 	}
-	for {
+	for i := 0; i < 100; i++ {
 		next := errors.Unwrap(err)
 		if next == nil {
 			return ErrorKind(err.Error())
 		}
 		err = next
 	}
+	// Hit the depth bound; return what we're holding rather than looping forever.
+	return ErrorKind(err.Error())
 }
 
 // ErrText emits the full error message, sanitized and capped. Use it when the message is

@@ -6,7 +6,17 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 )
+
+// cyclicErr is a test error type whose Unwrap() returns itself, for testing
+// that Err() doesn't hang on cyclic chains.
+type cyclicErr struct {
+	msg string
+}
+
+func (e *cyclicErr) Error() string { return e.msg }
+func (e *cyclicErr) Unwrap() error { return e }
 
 func TestSanitizeReplacesControlCharacters(t *testing.T) {
 	// Every one of these can forge a line or break a parser downstream.
@@ -140,5 +150,29 @@ func TestErrDropsTheWrappingAndKeepsTheKind(t *testing.T) {
 func TestErrOfNilContributesNothing(t *testing.T) {
 	if got := Err(nil).attr(); !got.Equal(slog.Attr{}) {
 		t.Errorf("Err(nil) = %v, want the empty attr", got)
+	}
+}
+
+func TestErrBoundsUnwrapLoopOnCyclicChain(t *testing.T) {
+	// A cyclic error chain would hang the unwrap loop without a depth bound.
+	// Run Err() in a goroutine with a timeout to catch any hangs.
+	result := make(chan Field, 1)
+	cyclic := &cyclicErr{msg: "cyclic error"}
+	go func() {
+		result <- Err(cyclic)
+	}()
+
+	select {
+	case f := <-result:
+		// Expected: should return a Field with key "error_kind" and a string value.
+		if f.key != "error_kind" {
+			t.Errorf("key = %q, want error_kind", f.key)
+		}
+		// The value should be the error string (hand-derived: "cyclic error").
+		if got := f.val.v.String(); got != "cyclic error" {
+			t.Errorf("value = %q, want cyclic error", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Err() hung on cyclic error chain")
 	}
 }
