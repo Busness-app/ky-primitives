@@ -16,13 +16,14 @@ func TestSealOpenRoundTrip(t *testing.T) {
 		{Path: "keys/signing.pem", Content: bytes.Repeat([]byte("k"), 4096), Mode: 0600},
 	}
 
-	raw, key, _, err := capsule.Seal("fixture", "0.0.0", want, nil, nil, 2, 3)
+	priv := testRecoveryKey(t)
+	raw, _, err := capsule.Seal("fixture", "0.0.0", want, nil, nil, 2, 3, priv.Public())
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	dir := filepath.Join(t.TempDir(), "restore")
-	_, got, err := capsule.Open(raw, key, dir)
+	_, got, err := capsule.Open(raw, priv, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,8 +49,9 @@ func TestSealOpenRoundTrip(t *testing.T) {
 
 // kycap/2 binds the manifest into the AEAD, and is the only container this package knows.
 func TestSealWritesKycap2(t *testing.T) {
-	raw, _, _, err := capsule.Seal("fixture", "0.0.0",
-		[]capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}, nil, nil, 2, 3)
+	priv := testRecoveryKey(t)
+	raw, _, err := capsule.Seal("fixture", "0.0.0",
+		[]capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}, nil, nil, 2, 3, priv.Public())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +84,8 @@ func TestSealWritesKycap2(t *testing.T) {
 }
 
 func TestSealRefusesEmptyCapsule(t *testing.T) {
-	if _, _, _, err := capsule.Seal("x", "0", nil, nil, nil, 2, 3); err == nil {
+	priv := testRecoveryKey(t)
+	if _, _, err := capsule.Seal("x", "0", nil, nil, nil, 2, 3, priv.Public()); err == nil {
 		t.Fatal("sealed a capsule with no files")
 	}
 }
@@ -90,9 +93,10 @@ func TestSealRefusesEmptyCapsule(t *testing.T) {
 // Seal enforces the same containment Open does, so it can never write a capsule this
 // package would then refuse to extract.
 func TestSealRefusesUnsafePaths(t *testing.T) {
+	priv := testRecoveryKey(t)
 	for _, p := range []string{"../escape.txt", "/etc/passwd", ".."} {
-		if _, _, _, err := capsule.Seal("x", "0",
-			[]capsule.File{{Path: p, Content: []byte("x"), Mode: 0600}}, nil, nil, 2, 3); err == nil {
+		if _, _, err := capsule.Seal("x", "0",
+			[]capsule.File{{Path: p, Content: []byte("x"), Mode: 0600}}, nil, nil, 2, 3, priv.Public()); err == nil {
 			t.Errorf("sealed a capsule containing %q", p)
 		}
 	}
@@ -105,8 +109,9 @@ func TestSealRefusesUnsafePaths(t *testing.T) {
 // says not to decide on what it returns — because Seal did not hand them back.
 func TestSealReturnsTheManifestItSealed(t *testing.T) {
 	files := []capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}
+	priv := testRecoveryKey(t)
 
-	raw, key, m, err := capsule.Seal("fixture", "0.0.0", files, nil, nil, 2, 3)
+	raw, m, err := capsule.Seal("fixture", "0.0.0", files, nil, nil, 2, 3, priv.Public())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +132,7 @@ func TestSealReturnsTheManifestItSealed(t *testing.T) {
 
 	// And Open, the only other producer of a Manifest, agrees on the fields Seal alone
 	// mints. A caller has no other source for these.
-	opened, _, err := capsule.Open(raw, key, "")
+	opened, _, err := capsule.Open(raw, priv, "")
 	if err != nil {
 		t.Fatal(err)
 	}

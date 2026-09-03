@@ -16,6 +16,8 @@ package capsule
 import (
 	"errors"
 	"os"
+
+	"github.com/Busness-app/ky-primitives/recoverykey"
 )
 
 var (
@@ -33,6 +35,10 @@ var (
 	ErrTargetNotEmpty = errors.New("restore target directory is not empty")
 	// ErrDuplicatePath reports two members that normalise to one destination.
 	ErrDuplicatePath = errors.New("capsule contains two paths that normalise to the same destination")
+	// ErrWrongRecoveryKey reports a capsule sealed to a recovery key other than the one
+	// Open was given. It is checked before any decapsulation, so a wrong kit fails cheaply
+	// and by name.
+	ErrWrongRecoveryKey = errors.New("capsule is sealed to a different recovery key")
 )
 
 // File is one member of a capsule's payload.
@@ -42,22 +48,21 @@ type File struct {
 	Mode    os.FileMode
 }
 
-// Open parses a kycap/2 container, decrypts it, verifies the payload hash, and returns the
-// authenticated manifest with the files. When targetDir is non-empty the files are also
-// written there under the containment rules in extract.go; the directory must be empty or
-// absent. When it is empty nothing is written and the files are returned in memory.
+// Open parses a kycap/3 container, decrypts it with the recovery private key, verifies the
+// payload hash, and returns the authenticated manifest with the files. When targetDir is
+// non-empty the files are also written there under the containment rules in extract.go;
+// the directory must be empty or absent. When it is empty nothing is written and the files
+// are returned in memory.
 //
 // The manifest is returned because a successful Open is the only proof it was not
 // rewritten. Callers that want it without a key want ReadUnverifiedManifest, and should
 // read that type's doc comment first.
 //
-// key is raw bytes, never a hex string. The suite's implementations disagree on that
-// (ky_server_base passes hex, kysignon-server passes bytes). Passing the hex spelling of a
-// 32-byte key is 64 bytes, which newGCM refuses outright, so the mistake is loud here —
-// but it was silent in the implementations this replaced, which hashed or truncated
-// whatever they were handed into 32 bytes and decrypted to garbage.
-func Open(raw, key []byte, targetDir string) (Manifest, []File, error) {
-	m, payload, err := decryptPayload(raw, key)
+// A capsule names the recovery key it was sealed to. Open compares that name with the key
+// it was given before decapsulating anything, and fails with ErrWrongRecoveryKey on a
+// mismatch — the custodians brought the wrong kit, and that is worth saying plainly.
+func Open(raw []byte, with recoverykey.PrivateKey, targetDir string) (Manifest, []File, error) {
+	m, payload, err := decryptPayload(raw, with)
 	if err != nil {
 		return Manifest{}, nil, err
 	}

@@ -9,8 +9,9 @@ import (
 )
 
 func TestReadUnverifiedManifestNeedsNoKey(t *testing.T) {
+	priv := testRecoveryKey(t)
 	files := []capsule.File{{Path: "db.sqlite", Content: []byte("payload"), Mode: 0o600}}
-	raw, _, _, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 3, 5)
+	raw, _, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 3, 5, priv.Public())
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -37,8 +38,9 @@ func TestReadUnverifiedManifestNeedsNoKey(t *testing.T) {
 // ciphertext parsed cleanly on the keyless path: a caller displaying only the manifest saw
 // a valid-looking capsule Open would refuse.
 func TestBothPathsRefuseACiphertextLessContainer(t *testing.T) {
+	priv := testRecoveryKey(t)
 	files := []capsule.File{{Path: "db.sqlite", Content: []byte("payload"), Mode: 0o600}}
-	raw, key, _, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 3, 5)
+	raw, _, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 3, 5, priv.Public())
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -55,7 +57,7 @@ func TestBothPathsRefuseACiphertextLessContainer(t *testing.T) {
 	if _, err := capsule.ReadUnverifiedManifest(stripped); !errors.Is(err, capsule.ErrCorruptCapsule) {
 		t.Errorf("ReadUnverifiedManifest got %v, want ErrCorruptCapsule", err)
 	}
-	if _, _, err := capsule.Open(stripped, key, ""); !errors.Is(err, capsule.ErrCorruptCapsule) {
+	if _, _, err := capsule.Open(stripped, priv, ""); !errors.Is(err, capsule.ErrCorruptCapsule) {
 		t.Errorf("Open got %v, want ErrCorruptCapsule", err)
 	}
 }
@@ -64,8 +66,9 @@ func TestBothPathsRefuseACiphertextLessContainer(t *testing.T) {
 // rewrite it. This test is the reason the two types are distinct — it demonstrates the
 // rewrite, so the type boundary is not merely decorative.
 func TestUnverifiedManifestIsRewritableWithoutTheKey(t *testing.T) {
+	priv := testRecoveryKey(t)
 	files := []capsule.File{{Path: "db.sqlite", Content: []byte("payload"), Mode: 0o600}}
-	raw, key, _, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 3, 5)
+	raw, _, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 3, 5, priv.Public())
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -100,7 +103,7 @@ func TestUnverifiedManifestIsRewritableWithoutTheKey(t *testing.T) {
 	}
 
 	// Open does not. This is the line that makes the type split worth having.
-	if _, _, err := capsule.Open(forged, key, ""); err == nil {
+	if _, _, err := capsule.Open(forged, priv, ""); err == nil {
 		t.Fatal("Open accepted a rewritten manifest")
 	}
 }
@@ -110,11 +113,12 @@ func TestManifestRecordsEveryFile(t *testing.T) {
 		{Path: "db.sqlite", Content: []byte("payload"), Mode: 0o600},
 		{Path: "keys/signing.key", Content: []byte("secret"), Mode: 0o400},
 	}
-	raw, key, _, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 2, 3)
+	priv := testRecoveryKey(t)
+	raw, _, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 2, 3, priv.Public())
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	m, _, err := capsule.Open(raw, key, "")
+	m, _, err := capsule.Open(raw, priv, "")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

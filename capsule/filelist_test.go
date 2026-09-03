@@ -24,8 +24,9 @@ func TestFileListNeverAppearsInTheClear(t *testing.T) {
 	const wantSum = "239f59ed55e737c77147cf55ad0c1b030b6d7ee748a7426952f9b852d5a935e5"
 	const wantPath = "keys/signing.key"
 
-	raw, key, sealed, err := Seal("kysignon", "1.0",
-		[]File{{Path: "./" + wantPath, Content: []byte("payload"), Mode: 0o644}}, nil, nil, 2, 3)
+	priv := testRecoveryKey(t)
+	raw, sealed, err := Seal("kysignon", "1.0",
+		[]File{{Path: "./" + wantPath, Content: []byte("payload"), Mode: 0o644}}, nil, nil, 2, 3, priv.Public())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +61,7 @@ func TestFileListNeverAppearsInTheClear(t *testing.T) {
 		t.Errorf("a keyless read returned %d file entries, want none", len(u.Files))
 	}
 
-	m, files, err := Open(raw, key, "")
+	m, files, err := Open(raw, priv, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,14 +83,15 @@ func TestFileListNeverAppearsInTheClear(t *testing.T) {
 
 // The list is metadata, not a member of the backup.
 func TestReservedMemberIsNeitherReturnedNorWritten(t *testing.T) {
-	raw, key, _, err := Seal("t", "1",
-		[]File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}, nil, nil, 2, 3)
+	priv := testRecoveryKey(t)
+	raw, _, err := Seal("t", "1",
+		[]File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}, nil, nil, 2, 3, priv.Public())
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	dir := filepath.Join(t.TempDir(), "restore")
-	_, files, err := Open(raw, key, dir)
+	_, files, err := Open(raw, priv, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,13 +127,14 @@ func TestReservedMemberIsNeitherReturnedNorWritten(t *testing.T) {
 func TestAMemberNamedLikeTheListDoesNotShadowIt(t *testing.T) {
 	const decoy = ".kycap-files.json"
 
-	raw, key, _, err := Seal("t", "1",
-		[]File{{Path: reservedFileList, Content: []byte("decoy"), Mode: 0600}}, nil, nil, 2, 3)
+	priv := testRecoveryKey(t)
+	raw, _, err := Seal("t", "1",
+		[]File{{Path: reservedFileList, Content: []byte("decoy"), Mode: 0600}}, nil, nil, 2, 3, priv.Public())
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	m, files, err := Open(raw, key, filepath.Join(t.TempDir(), "restore"))
+	m, files, err := Open(raw, priv, filepath.Join(t.TempDir(), "restore"))
 	if err != nil {
 		t.Fatal(err)
 	}

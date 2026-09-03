@@ -47,6 +47,14 @@ type UnverifiedManifest struct {
 	PayloadHash string    `json:"payload_hash"`
 	Threshold   int       `json:"threshold"`
 	TotalShares int       `json:"total_shares"`
+	// RecoveryKeyID names the recovery key this capsule is sealed to: recoverykey.PublicKey.ID().
+	// Not secret — it is a hash of a public key — and in the clear on purpose, so kyrecovery
+	// can display it and refuse a deposit sealed to a key it did not hand out, without
+	// holding any key at all.
+	RecoveryKeyID string `json:"recovery_key_id"`
+	// EncapsulatedKey is the HPKE encapsulated key, standard base64 of 1120 bytes. Public by
+	// construction. Inside the AAD like every other field, so swapping it fails the AEAD.
+	EncapsulatedKey string `json:"encapsulated_key"`
 
 	// Files is not a manifest field. The manifest is stored in the clear, so a per-member
 	// path, size and digest published there is readable by anyone who merely holds the

@@ -4,16 +4,19 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"crypto/rand"
+	"crypto/hpke"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/Busness-app/ky-primitives/recoverykey"
 )
 
-// Seal writes a kycap/2 container and returns it with the freshly generated AES-256 key
-// that opens it, and the manifest it sealed.
+// Seal writes a kycap/3 container sealed to the suite recovery public key, and returns it
+// with the manifest it sealed.
 //
 // The manifest is returned because Seal is the only place CapsuleID, CreatedAt and
 // PayloadHash exist: they are minted here and have no other source. Returning only the
@@ -22,39 +25,32 @@ import (
 // returns, to read fields it had just authored. This value is a Manifest because it is the
 // one that went into the AEAD, not one read back out of a container.
 //
-// Seal does not split the key into Shamir shares. The kycap/1 container has never carried
-// shares — kysignon-server's SerializeCapsule writes "manifest plus ciphertext, no
-// shards" — and the shares belong to the recovery kit that accompanies a capsule, not to
-// the capsule itself. Callers split the returned key themselves.
-func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]any, threshold, totalShares int) (raw, key []byte, m Manifest, err error) {
+// Seal returns no key. The payload is sealed to a public key through HPKE, the shared
+// secret exists only inside crypto/hpke for the duration of this call, and the only thing
+// that opens the result is the recovery private key the custodians hold in shares. A
+// product that calls Seal holds nothing afterwards that it did not hold before.
+func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]any, threshold, totalShares int, to recoverykey.PublicKey) (raw []byte, m Manifest, err error) {
 	if len(files) == 0 {
-		return nil, nil, Manifest{}, fmt.Errorf("refusing to seal a capsule with no files")
+		return nil, Manifest{}, fmt.Errorf("refusing to seal a capsule with no files")
 	}
 	// The same invariant shamir.Split enforces. A capsule states its recovery topology in
 	// the manifest, and a capsule advertising 5-of-3 — or 0-of-3, which reads as "no
 	// shares needed" — sends a custodian looking for a kit that was never issuable.
 	// Recording the number without checking it makes the manifest decoration.
 	if threshold < 2 || totalShares < threshold || totalShares > 255 {
-		return nil, nil, Manifest{}, fmt.Errorf("capsule: %d-of-%d is not a recoverable kit; need 2 <= threshold <= total <= 255", threshold, totalShares)
+		return nil, Manifest{}, fmt.Errorf("capsule: %d-of-%d is not a recoverable kit; need 2 <= threshold <= total <= 255", threshold, totalShares)
 	}
 
 	payload, entries, err := buildPayload(files)
 	if err != nil {
-		return nil, nil, Manifest{}, err
+		return nil, Manifest{}, err
 	}
 
-	key = make([]byte, 32)
-	if _, err := rand.Read(key); err != nil {
-		return nil, nil, Manifest{}, fmt.Errorf("failed to generate capsule key: %w", err)
-	}
-
-	gcm, err := newGCM(key)
+	// The encapsulated key is minted before the manifest because the manifest carries it,
+	// and the manifest is the AAD for the seal that follows.
+	enc, sender, err := hpke.NewSender(to.HPKE(), hpkeKDF(), hpkeAEAD(), hpkeInfo())
 	if err != nil {
-		return nil, nil, Manifest{}, err
-	}
-	nonce := make([]byte, gcm.NonceSize())
-	if _, err := rand.Read(nonce); err != nil {
-		return nil, nil, Manifest{}, fmt.Errorf("failed to generate capsule nonce: %w", err)
+		return nil, Manifest{}, fmt.Errorf("failed to encapsulate capsule key: %w", err)
 	}
 
 	sum := sha256.Sum256(payload)
@@ -68,6 +64,8 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 		PayloadHash:        hex.EncodeToString(sum[:]),
 		Threshold:          threshold,
 		TotalShares:        totalShares,
+		RecoveryKeyID:      to.ID(),
+		EncapsulatedKey:    base64.StdEncoding.EncodeToString(enc),
 		Files:              entries,
 		Dependencies:       deps,
 		VerificationRecipe: recipe,
@@ -79,7 +77,7 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 	// TestSealReturnsTheManifestItSealed re-encodes it against the container's own bytes.
 	manifestBytes, err := json.Marshal(sealedManifest)
 	if err != nil {
-		return nil, nil, Manifest{}, err
+		return nil, Manifest{}, err
 	}
 	// The last limit Open enforces that sealing can reach. The manifest grows with caller
 	// input in several places — deps, recipe, and the version strings — and none of them is
@@ -91,10 +89,13 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 	// with ErrCorruptCapsule — a backup that cannot be restored, found at restore time.
 	// TestSealRefusesWhatOpenWouldRefuse holds this, for both bounds.
 	if len(manifestBytes) > maxManifestBytes {
-		return nil, nil, Manifest{}, fmt.Errorf("%w: manifest is %d bytes, Open permits %d", ErrCapsuleTooLarge, len(manifestBytes), maxManifestBytes)
+		return nil, Manifest{}, fmt.Errorf("%w: manifest is %d bytes, Open permits %d", ErrCapsuleTooLarge, len(manifestBytes), maxManifestBytes)
 	}
 
-	sealed := gcm.Seal(nonce, nonce, payload, manifestBytes)
+	sealed, err := sender.Seal(manifestBytes, payload)
+	if err != nil {
+		return nil, Manifest{}, fmt.Errorf("failed to seal capsule: %w", err)
+	}
 
 	// json.Marshal rather than MarshalIndent: indenting re-spaces the embedded manifest,
 	// and the AAD is the manifest's exact bytes. A pretty container that cannot be opened
@@ -105,9 +106,9 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 		Ciphertext: EncodeCiphertext(sealed),
 	})
 	if err != nil {
-		return nil, nil, Manifest{}, err
+		return nil, Manifest{}, err
 	}
-	return raw, key, Manifest{UnverifiedManifest: sealedManifest}, nil
+	return raw, Manifest{UnverifiedManifest: sealedManifest}, nil
 }
 
 // buildPayload writes the files as a gzipped tar, the plaintext both containers hold, and
