@@ -167,3 +167,15 @@ func loadFixture(t *testing.T, path string) (raw []byte, with recoverykey.Privat
 	}
 	return raw, with
 }
+
+// The kycap/2 capsule this package used to write is refused at the format check. It is
+// kept so that refusal is measured against a real container, not a hand-typed one.
+func TestRetiredKycap2FixtureIsRefused(t *testing.T) {
+	raw, err := os.ReadFile("../testdata/capsules/retired/kycap2.kycap")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := capsule.Open(raw, testRecoveryKey(t), ""); !errors.Is(err, capsule.ErrUnknownContainer) {
+		t.Fatalf("got %v, want ErrUnknownContainer", err)
+	}
+}
