@@ -10,8 +10,18 @@ import (
 	"unicode/utf8"
 )
 
-// FuzzFieldValuesCannotForgeALine is the package's primary security property under
-// random input: whatever a value contains, one call produces one parseable line.
+// FuzzFieldValuesCannotForgeALine drives random input through both channels this package
+// bounds: the typed field API, and the raw message a product on Handler() still controls
+// directly.
+//
+// Most of what it checks already holds through slog's own JSON encoding, sanitize or not:
+// slog escapes every byte under 0x20 and replaces invalid UTF-8 on its own, so a bare
+// newline or a bad byte was never going to split a line by itself. Two things are actually
+// pinned here. DEL (0x7f) is in slog's safeSet and ships unescaped, so keeping it off the
+// line is sanitize's job, not the encoder's. And cutting a value at the maxValueBytes
+// budget has to land on a rune boundary, never splitting one into invalid UTF-8. The rest
+// of what is asserted below — one line per call, no forged seq key — are cheap regression
+// guards on top, not properties unique to this package.
 func FuzzFieldValuesCannotForgeALine(f *testing.F) {
 	f.Add("plain")
 	f.Add("a\nb")
@@ -27,36 +37,59 @@ func FuzzFieldValuesCannotForgeALine(f *testing.F) {
 			t.Fatal(err)
 		}
 		lg.Log(context.Background(), Started, Version(v), UserID(v), Action(v))
-
-		out := buf.String()
-		if n := strings.Count(out, "\n"); n != 1 {
-			t.Fatalf("one call produced %d newlines: %q", n, out)
-		}
-		body := strings.TrimSuffix(out, "\n")
-		for _, r := range body {
-			if r < 0x20 && r != '\t' || r == 0x7f {
-				t.Fatalf("a raw control character reached the line: %q", body)
-			}
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(body), &m); err != nil {
-			t.Fatalf("line is not JSON: %v\n%q", err, body)
-		}
+		m := checkLine(t, buf.String())
 		for _, key := range []string{"version", "user_id", "action"} {
-			s, ok := m[key].(string)
-			if !ok {
-				t.Fatalf("%s is %T, want a string", key, m[key])
-			}
-			if len(s) > maxValueBytes {
-				t.Fatalf("%s is %d bytes, over the %d ceiling", key, len(s), maxValueBytes)
-			}
-			if !utf8.ValidString(s) {
-				t.Fatalf("%s is not valid UTF-8: %q", key, s)
-			}
+			checkValue(t, m, key)
 		}
-		// A value must never be able to inject an audit record.
+		// A field value must never be able to inject an audit record.
 		if _, ok := m["seq"]; ok {
-			t.Fatalf("a field value produced a seq key: %q", body)
+			t.Fatalf("a field value produced a seq key: %v", m)
 		}
+
+		// The raw message on the Handler() path is caller-controlled free text this
+		// package does not vocabulary-bound; it still has to land safely.
+		var msgBuf bytes.Buffer
+		mlg, err := New(Config{App: "kyfuzz", Level: slog.LevelDebug, Out: &msgBuf})
+		if err != nil {
+			t.Fatal(err)
+		}
+		slog.New(mlg.Handler()).Info(v)
+		checkValue(t, checkLine(t, msgBuf.String()), "message")
 	})
+}
+
+// checkLine asserts one call produced one parseable JSON line and returns it decoded.
+func checkLine(t *testing.T, out string) map[string]any {
+	t.Helper()
+	if n := strings.Count(out, "\n"); n != 1 {
+		t.Fatalf("one call produced %d newlines: %q", n, out)
+	}
+	body := strings.TrimSuffix(out, "\n")
+	for _, r := range body {
+		// r != '\t' never actually fires: sanitize replaces a raw tab with U+FFFD
+		// before slog ever sees one, so no literal tab byte reaches this loop.
+		if r < 0x20 && r != '\t' || r == 0x7f {
+			t.Fatalf("a raw control character reached the line: %q", body)
+		}
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(body), &m); err != nil {
+		t.Fatalf("line is not JSON: %v\n%q", err, body)
+	}
+	return m
+}
+
+// checkValue asserts a rendered value round-trips as a bounded, valid string.
+func checkValue(t *testing.T, m map[string]any, key string) {
+	t.Helper()
+	s, ok := m[key].(string)
+	if !ok {
+		t.Fatalf("%s is %T, want a string", key, m[key])
+	}
+	if len(s) > maxValueBytes {
+		t.Fatalf("%s is %d bytes, over the %d ceiling", key, len(s), maxValueBytes)
+	}
+	if !utf8.ValidString(s) {
+		t.Fatalf("%s is not valid UTF-8: %q", key, s)
+	}
 }

@@ -327,13 +327,16 @@ and a declared name vouches for the key, not for whatever Go value showed up und
 that is the first thing a migrating call site hits.
 
 Audit lines are flat and carry `seq`, `prev`, `hash` and `fields` at the top level, so
-`cmd/kyauditverify` verifies the collector's export unchanged. `Audit` recomputes the flat
-keys from the fields it is given and checks them against the record's own `Fields`; a
-disagreement is caught at emission, not assumed away by construction, and costs the flat
-keys — replaced with an `audit_fields_mismatch` marker — while the record itself, the part
-that is authenticated, ships regardless. The product keeps its own local chained file: a
-tamper-evident chain that exists only on a machine the attacker may also own is not
-evidence.
+`cmd/kyauditverify` needs no code change to verify them — provided the export handed to it
+is filtered to the lines that carry `hash` first. An ordinary `Log` or `Security` line has
+none of those four keys; it decodes into a zero `auditchain.Record` with no JSON error, and
+`VerifyStream` reports that as a broken chain, not as a line outside its scope. `Audit`
+recomputes the flat keys from the fields it is given and checks them against the record's
+own `Fields`; a disagreement is caught at emission, not assumed away by construction, and
+costs the flat keys — replaced with an `audit_fields_mismatch` marker — while the record
+itself, the part that is authenticated, ships regardless. The product keeps its own local
+chained file: a tamper-evident chain that exists only on a machine the attacker may also
+own is not evidence.
 
 There is no syslog renderer. `log/syslog` is frozen, absent on Windows and Plan 9, and
 broken on macOS 12 and later. Writing RFC 5424 to stderr instead would double-frame the

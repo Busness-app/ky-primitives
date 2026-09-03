@@ -35,7 +35,7 @@ existing local chained file.
 | A collector agent ships; the library formats | No reconnect, TLS, spool or backpressure code to keep true. A crashed product still gets its last lines shipped. |
 | Closed field vocabulary, declared in one place | A key that was never declared cannot be emitted. Replaces kypost's denylist, which fails silently on a key nobody thought of. |
 | Values are typed and bounded, never `any` | You cannot log a whole request struct and find out later it held a token. |
-| Audit lines are flat and carry `seq`/`prev`/`hash`/`fields` | `cmd/kyauditverify` parses the shipped stream unchanged. |
+| Audit lines are flat and carry `seq`/`prev`/`hash`/`fields` | `cmd/kyauditverify` parses them unchanged, once the export is filtered to lines carrying `hash`. |
 | Audit storage stays with the product | `auditchain` "deliberately owns no storage" and this does not change that. |
 | Both a typed API and a `slog.Handler` | kydns threads `*slog.Logger` through nine components; without a handler it could not adopt. |
 
@@ -140,7 +140,10 @@ high-value target, and one built hastily is worse than not having it.
 The one capability off-the-shelf cannot provide is chain verification, and it already
 exists. `cmd/kyauditverify` reads `auditchain.Record` values one per JSON line, plus an
 anchor, and verifies. If audit lines are shaped so that tool parses them, "central audit
-verification" is the existing 111-line command pointed at the collector's export.
+verification" is the existing 111-line command pointed at the collector's export, filtered
+first to the lines carrying `hash` — an ordinary log line has none of the four audit keys
+and would otherwise read to `VerifyStream` as a broken chain, not as data outside the
+tool's scope.
 
 A tamper-evident chain nobody checks is decoration. This is the cheapest way to check it.
 
