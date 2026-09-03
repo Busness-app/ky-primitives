@@ -1,6 +1,7 @@
 package kyprimitives
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -10,10 +11,11 @@ import (
 
 // allowed is the module's entire dependency budget.
 //
-// The rule used to be "no dependencies, ever", so that products with minimal trees —
-// kypassword-server's go.mod requires nothing at all — could import capsule and shamir
-// for free. Argon2 broke it: the suite standardised on it for password hashing, and it is
-// not in the standard library and not on a proposal track.
+// The rule used to be "no dependencies, ever", so that products with minimal trees could
+// import capsule and shamir for free — kypassword-server's go.mod named no third-party
+// module at all, and now names exactly one: this library. Argon2 broke the rule: the suite
+// standardised on it for password hashing, and it is not in the standard library and not
+// on a proposal track.
 //
 // So the budget is x/crypto and the x/sys it drags in, and nothing else. Every other
 // package in this module stays standard-library-only; a consumer that only wants capsule
@@ -71,39 +73,48 @@ func TestModuleDependenciesAreAllowlisted(t *testing.T) {
 //
 // It discovers packages rather than listing them, so a package added later is covered
 // without anyone remembering to add it here.
+//
+// The walk is recursive on purpose. It used to read one directory level, so cmd/ was
+// listed and cmd/kyauditverify/ — where every command actually lives — was never opened:
+// an x/crypto import placed there passed this test and TestModuleDependenciesAreAllowlisted
+// alike, because x/crypto is already a permitted require. A one-level scan cannot make the
+// "covered without anyone remembering" promise the paragraph above makes.
 func TestOnlyPasswordImportsADependency(t *testing.T) {
-	entries, err := os.ReadDir(".")
+	checked := 0
+	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			name := d.Name()
+			if path != "." && (name == "password" || name == "testdata" || strings.HasPrefix(name, ".")) {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		// This file names the allowed modules as string literals, so scanning it for
+		// import paths would report its own allowlist as a violation.
+		if !strings.HasSuffix(path, ".go") || path == "nodeps_test.go" {
+			return nil
+		}
+		checked++
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, dep := range []string{"golang.org/x/", "github.com/"} {
+			for _, imp := range importsOf(string(src), dep) {
+				// The module importing itself is not a dependency.
+				if strings.HasPrefix(imp, selfModule) {
+					continue
+				}
+				t.Errorf("%s imports %s; only password may", path, imp)
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
-	}
-	checked := 0
-	for _, dir := range entries {
-		if !dir.IsDir() || dir.Name() == "password" || dir.Name() == "testdata" || strings.HasPrefix(dir.Name(), ".") {
-			continue
-		}
-		files, err := os.ReadDir(dir.Name())
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, e := range files {
-			if !strings.HasSuffix(e.Name(), ".go") {
-				continue
-			}
-			checked++
-			src, err := os.ReadFile(filepath.Join(dir.Name(), e.Name()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, dep := range []string{"golang.org/x/", "github.com/"} {
-				for _, imp := range importsOf(string(src), dep) {
-					// The module importing itself is not a dependency.
-					if strings.HasPrefix(imp, selfModule) {
-						continue
-					}
-					t.Errorf("%s/%s imports %s; only password may", dir.Name(), e.Name(), imp)
-				}
-			}
-		}
 	}
 	if checked == 0 {
 		t.Fatal("no package files were checked, so this test proves nothing")

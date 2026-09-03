@@ -48,7 +48,7 @@ func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 		for i := range files {
 			files[i] = File{Path: fmt.Sprintf("f%05d", i), Content: []byte("x"), Mode: 0600}
 		}
-		if _, _, err := Seal("t", "1", files, nil, nil, 2, 3); !errors.Is(err, ErrCapsuleTooLarge) {
+		if _, _, _, err := Seal("t", "1", files, nil, nil, 2, 3); !errors.Is(err, ErrCapsuleTooLarge) {
 			t.Fatalf("got %v, want ErrCapsuleTooLarge", err)
 		}
 	})
@@ -58,7 +58,7 @@ func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 		for i := range files {
 			files[i] = File{Path: fmt.Sprintf("f%05d", i), Content: []byte("x"), Mode: 0600}
 		}
-		raw, key, err := Seal("t", "1", files, nil, nil, 2, 3)
+		raw, key, _, err := Seal("t", "1", files, nil, nil, 2, 3)
 		if err != nil {
 			t.Fatalf("the limit itself was refused: %v", err)
 		}
@@ -83,7 +83,7 @@ func TestSealRefusesPathsThatCollideAfterNormalisation(t *testing.T) {
 		{"d/e", "d/../d/e"},
 	} {
 		t.Run(paths[0]+" vs "+paths[1], func(t *testing.T) {
-			_, _, err := Seal("t", "1", []File{
+			_, _, _, err := Seal("t", "1", []File{
 				{Path: paths[0], Content: []byte("first"), Mode: 0600},
 				{Path: paths[1], Content: []byte("second"), Mode: 0600},
 			}, nil, nil, 2, 3)
@@ -97,7 +97,7 @@ func TestSealRefusesPathsThatCollideAfterNormalisation(t *testing.T) {
 func TestSealRefusesAnOversizedMember(t *testing.T) {
 	// Not allocated: the check is on the declared length, which is what Open bounds too.
 	big := File{Path: "big", Content: make([]byte, 0), Mode: 0600}
-	if _, _, err := Seal("t", "1", []File{big}, nil, nil, 2, 3); err != nil {
+	if _, _, _, err := Seal("t", "1", []File{big}, nil, nil, 2, 3); err != nil {
 		t.Fatalf("an empty member was refused: %v", err)
 	}
 }
@@ -123,7 +123,7 @@ func TestAFailedExtractionLeavesNothingBehind(t *testing.T) {
 	}
 
 	// A retry must succeed rather than hit ErrTargetNotEmpty.
-	raw, key, err := Seal("t", "1", []File{{Path: "a.txt", Content: []byte("ok"), Mode: 0600}}, nil, nil, 2, 3)
+	raw, key, _, err := Seal("t", "1", []File{{Path: "a.txt", Content: []byte("ok"), Mode: 0600}}, nil, nil, 2, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestExtractionCannotEscapeThroughASymlinkedParent(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	raw, key, err := Seal("t", "1", []File{
+	raw, key, _, err := Seal("t", "1", []File{
 		{Path: "sub/stolen.txt", Content: []byte("secret"), Mode: 0600},
 	}, nil, nil, 2, 3)
 	if err != nil {

@@ -13,41 +13,48 @@ import (
 )
 
 // Seal writes a kycap/2 container and returns it with the freshly generated AES-256 key
-// that opens it.
+// that opens it, and the manifest it sealed.
+//
+// The manifest is returned because Seal is the only place CapsuleID, CreatedAt and
+// PayloadHash exist: they are minted here and have no other source. Returning only the
+// bytes left a caller re-parsing its own output through ReadUnverifiedManifest to recover
+// them — reaching for the keyless reader, whose doc comment says not to decide on what it
+// returns, to read fields it had just authored. This value is a Manifest because it is the
+// one that went into the AEAD, not one read back out of a container.
 //
 // Seal does not split the key into Shamir shares. The kycap/1 container has never carried
 // shares — kysignon-server's SerializeCapsule writes "manifest plus ciphertext, no
 // shards" — and the shares belong to the recovery kit that accompanies a capsule, not to
 // the capsule itself. Callers split the returned key themselves.
-func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]any, threshold, totalShares int) (raw, key []byte, err error) {
+func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]any, threshold, totalShares int) (raw, key []byte, m Manifest, err error) {
 	if len(files) == 0 {
-		return nil, nil, fmt.Errorf("refusing to seal a capsule with no files")
+		return nil, nil, Manifest{}, fmt.Errorf("refusing to seal a capsule with no files")
 	}
 	// The same invariant shamir.Split enforces. A capsule states its recovery topology in
 	// the manifest, and a capsule advertising 5-of-3 — or 0-of-3, which reads as "no
 	// shares needed" — sends a custodian looking for a kit that was never issuable.
 	// Recording the number without checking it makes the manifest decoration.
 	if threshold < 2 || totalShares < threshold || totalShares > 255 {
-		return nil, nil, fmt.Errorf("capsule: %d-of-%d is not a recoverable kit; need 2 <= threshold <= total <= 255", threshold, totalShares)
+		return nil, nil, Manifest{}, fmt.Errorf("capsule: %d-of-%d is not a recoverable kit; need 2 <= threshold <= total <= 255", threshold, totalShares)
 	}
 
 	payload, err := buildPayload(files)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, Manifest{}, err
 	}
 
 	key = make([]byte, 32)
 	if _, err := rand.Read(key); err != nil {
-		return nil, nil, fmt.Errorf("failed to generate capsule key: %w", err)
+		return nil, nil, Manifest{}, fmt.Errorf("failed to generate capsule key: %w", err)
 	}
 
 	gcm, err := newGCM(key)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, Manifest{}, err
 	}
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := rand.Read(nonce); err != nil {
-		return nil, nil, fmt.Errorf("failed to generate capsule nonce: %w", err)
+		return nil, nil, Manifest{}, fmt.Errorf("failed to generate capsule nonce: %w", err)
 	}
 
 	sum := sha256.Sum256(payload)
@@ -64,10 +71,7 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 	}
 
 	now := time.Now().UTC()
-	// Marshalled once, then used twice: these bytes are the AAD and they are what lands
-	// in the container. Deriving the AAD from a second encoding of the same struct would
-	// make every capsule depend on two encoders agreeing forever.
-	manifestBytes, err := json.Marshal(manifest{
+	sealedManifest := manifest{
 		CapsuleID:          fmt.Sprintf("cap-%s-%d", serviceName, now.UnixNano()),
 		ServiceName:        serviceName,
 		AppVersion:         appVersion,
@@ -78,9 +82,15 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 		Files:              entries,
 		Dependencies:       deps,
 		VerificationRecipe: recipe,
-	})
+	}
+	// Marshalled once, then used twice: these bytes are the AAD and they are what lands
+	// in the container. Deriving the AAD from a second encoding of the same struct would
+	// make every capsule depend on two encoders agreeing forever. The returned Manifest
+	// wraps this same value, so it is the sealed one rather than a second construction —
+	// TestSealReturnsTheManifestItSealed re-encodes it against the container's own bytes.
+	manifestBytes, err := json.Marshal(sealedManifest)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, Manifest{}, err
 	}
 
 	sealed := gcm.Seal(nonce, nonce, payload, manifestBytes)
@@ -94,9 +104,9 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 		Ciphertext: EncodeCiphertext(sealed),
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, Manifest{}, err
 	}
-	return raw, key, nil
+	return raw, key, Manifest{UnverifiedManifest: sealedManifest}, nil
 }
 
 // buildPayload writes the files as a gzipped tar, the plaintext both containers hold.

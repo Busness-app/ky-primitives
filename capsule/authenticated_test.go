@@ -25,7 +25,7 @@ func TestOpenRejectsATamperedManifest(t *testing.T) {
 
 	for name, edit := range edits {
 		t.Run(name, func(t *testing.T) {
-			raw, key, err := capsule.Seal("fixture", "0.0.0",
+			raw, key, _, err := capsule.Seal("fixture", "0.0.0",
 				[]capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}, nil, nil, 2, 3)
 			if err != nil {
 				t.Fatal(err)
@@ -48,7 +48,7 @@ func TestOpenRejectsATamperedManifest(t *testing.T) {
 // The manifest is authenticated, so an untouched capsule must still open. Without this
 // the test above passes for a Seal that produces nothing openable at all.
 func TestOpenAcceptsAnUntamperedManifest(t *testing.T) {
-	raw, key, err := capsule.Seal("fixture", "0.0.0",
+	raw, key, _, err := capsule.Seal("fixture", "0.0.0",
 		[]capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}, nil, nil, 2, 3)
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +72,7 @@ func TestSealRefusesImpossibleShareParameters(t *testing.T) {
 		"total past the field":  {2, 256},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, _, err := capsule.Seal("x", "0", files, nil, nil, tc.threshold, tc.total); err == nil {
+			if _, _, _, err := capsule.Seal("x", "0", files, nil, nil, tc.threshold, tc.total); err == nil {
 				t.Fatalf("sealed a capsule advertising %d-of-%d", tc.threshold, tc.total)
 			}
 		})

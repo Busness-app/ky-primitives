@@ -52,9 +52,10 @@ type File struct {
 // read that type's doc comment first.
 //
 // key is raw bytes, never a hex string. The suite's implementations disagree on that
-// (ky_server_base passes hex, kysignon-server passes bytes) and bytes is the one that
-// cannot be got wrong silently: a hex string of the right length is a valid 64-byte key
-// that simply decrypts to garbage.
+// (ky_server_base passes hex, kysignon-server passes bytes). Passing the hex spelling of a
+// 32-byte key is 64 bytes, which newGCM refuses outright, so the mistake is loud here —
+// but it was silent in the implementations this replaced, which hashed or truncated
+// whatever they were handed into 32 bytes and decrypted to garbage.
 func Open(raw, key []byte, targetDir string) (Manifest, []File, error) {
 	m, payload, err := decryptPayload(raw, key)
 	if err != nil {

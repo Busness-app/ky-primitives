@@ -24,10 +24,12 @@ type FileEntry struct {
 // a 2-of-3 kit could be restated as 1-of-1 and still open. Reading it without the key
 // gives that guarantee up.
 //
-// So it is a distinct type from Manifest, and the compiler is what keeps the two apart.
-// Show these fields to an operator if you must; do not decide anything on them. Anything
-// that chooses a restore path, a quorum, or a verification rule wants Manifest, which only
-// a successful Open can produce.
+// So it is a distinct type from Manifest. The compiler stops one being passed where the
+// other is required, which catches the accident — it cannot stop deliberate construction,
+// because Manifest's only field is exported and a caller may write Manifest{...} itself.
+// The type is a guard rail, not a proof. Show these fields to an operator if you must; do
+// not decide anything on them. Anything that chooses a restore path, a quorum, or a
+// verification rule wants Manifest, which only a successful Open or Seal produces.
 type UnverifiedManifest struct {
 	CapsuleID   string      `json:"capsule_id"`
 	ServiceName string      `json:"service_name"`

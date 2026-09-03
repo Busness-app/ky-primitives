@@ -9,7 +9,7 @@ import (
 
 func TestReadUnverifiedManifestNeedsNoKey(t *testing.T) {
 	files := []capsule.File{{Path: "db.sqlite", Content: []byte("payload"), Mode: 0o600}}
-	raw, _, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 3, 5)
+	raw, _, _, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 3, 5)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestReadUnverifiedManifestNeedsNoKey(t *testing.T) {
 // rewrite, so the type boundary is not merely decorative.
 func TestUnverifiedManifestIsRewritableWithoutTheKey(t *testing.T) {
 	files := []capsule.File{{Path: "db.sqlite", Content: []byte("payload"), Mode: 0o600}}
-	raw, key, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 3, 5)
+	raw, key, _, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 3, 5)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestManifestRecordsEveryFile(t *testing.T) {
 		{Path: "db.sqlite", Content: []byte("payload"), Mode: 0o600},
 		{Path: "keys/signing.key", Content: []byte("secret"), Mode: 0o400},
 	}
-	raw, key, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 2, 3)
+	raw, key, _, err := capsule.Seal("kyrecovery", "2.1", files, nil, nil, 2, 3)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}

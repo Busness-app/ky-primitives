@@ -117,7 +117,23 @@ func resetPeak() {
 const (
 	// MinIterations and MaxIterations bound a value that arrives from a client or a
 	// stored record. Below the floor the stretch is worthless; above the ceiling one
-	// login can ask for minutes of CPU. Both products already agreed on these.
+	// login can ask for minutes of CPU.
+	//
+	// The two products do not agree on the ceiling, and this constant takes the looser
+	// of the two. kypost-server enforces 12,000,000 and nothing tighter sits in front of
+	// it (users.MaxLoginIterations, checked in login_params.go). kynotes-server's
+	// derivation carries the same 12,000,000 (auth.MaxLoginIterations), but every route
+	// that accepts an iteration count from a client refuses anything over 1,000,000
+	// first — httpapi/auth_routes.go:80,227 and admin_routes.go:135,246 — so what
+	// kynotes actually admits is 12x smaller than what this package admits.
+	//
+	// Which ceiling is right is unresolved, and it is a product decision rather than a
+	// library one. Adopting this package as the only bound raises kynotes' effective
+	// ceiling 12-fold; keep the tighter route check until that call is made.
+	//
+	// The cross-repo line numbers above are evidence this module cannot execute — it has
+	// no access to those repositories. What it can pin is its own pair of numbers, so
+	// that moving either one is a deliberate diff: TestIterationBoundsAreWhatTheDocSays.
 	MinIterations = 100_000
 	MaxIterations = 12_000_000
 
@@ -153,8 +169,12 @@ func AuthSecretContext(ctx context.Context, password, saltBase64 string, iterati
 	if err := acquire(ctx); err != nil {
 		return "", err
 	}
+	// Deferred, as password.HashWith defers its own release: an inline call is skipped if
+	// pbkdf2.Key panics, and a slot lost that way is lost for the life of the process. The
+	// HKDF expansion below is microseconds and holding the slot across it changes nothing.
+	defer release()
+
 	stretched, err := pbkdf2.Key(sha256.New, password, salt, iterations, keyBytes)
-	release()
 	if err != nil {
 		return "", fmt.Errorf("derive: %w", err)
 	}

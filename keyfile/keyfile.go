@@ -37,8 +37,10 @@ var (
 // caller, and a weak key is worse than a loud failure.
 const minSize = 16
 
-// mu serialises callers in this process. os.O_EXCL handles the cross-process race; this
-// stops the common in-process one without paying for a lock file.
+// mu serialises callers in this process. create's os.Link handles the cross-process race —
+// link fails with EEXIST when the name is taken, and unlike O_EXCL on the final path it
+// cannot leave a partial file there. This mutex stops the common in-process race without
+// paying for a lock file.
 var mu sync.Mutex
 
 // LoadOrCreate returns the size-byte secret stored at path as lowercase hex, creating it
