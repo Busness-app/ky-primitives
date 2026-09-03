@@ -4,17 +4,28 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"iter"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Busness-app/ky-primitives/auditchain"
 )
 
+// testExpiresAt is a time-valued field declared only for these tests: the vocabulary in
+// field.go has no time-typed key, and the renderValue/JSONHandler agreement this file
+// checks needs one.
+var testExpiresAt = DeclareTime("audit_test_expires_at")
+
 func TestAuditFieldsRendersCanonicalPairs(t *testing.T) {
-	got := AuditFields(UserID("u_1"), Action("share_redeem"), ShareIndex(7))
-	want := []string{"user_id=u_1", "action=share_redeem", "share_index=7"}
+	ts := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	got := AuditFields(UserID("u_1"), Action("share_redeem"), ShareIndex(7), testExpiresAt(ts))
+	want := []string{
+		"user_id=u_1", "action=share_redeem", "share_index=7",
+		"audit_test_expires_at=2026-09-03T12:00:00Z",
+	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d fields, want %d: %v", len(got), len(want), got)
 	}
@@ -26,7 +37,12 @@ func TestAuditFieldsRendersCanonicalPairs(t *testing.T) {
 }
 
 func TestAuditFieldsSanitizes(t *testing.T) {
-	// A newline here would forge a record inside the digested field list.
+	// AuditFields inherits sanitization from DeclaredString's constructor (this test
+	// exercises that, not anything AuditFields itself does): the digest itself needs no
+	// defence, since auditchain's digest length-prefixes every field and the field count,
+	// so a raw newline cannot shift content into a neighbouring field or forge a record.
+	// Sanitizing still matters downstream — a key=value grep over the shipped fields, or
+	// any other tool that treats a field as a line, is what a literal newline would break.
 	got := AuditFields(UserID("u_1\nuser_id=u_2"))
 	if strings.ContainsAny(got[0], "\n\r") {
 		t.Errorf("AuditFields kept a control character: %q", got[0])
@@ -35,33 +51,83 @@ func TestAuditFieldsSanitizes(t *testing.T) {
 
 func TestAuditLineAgreesWithTheDigestedFields(t *testing.T) {
 	// The two must carry the same values: one is what the digest covers, the
-	// other is what the collector indexes.
+	// other is what the collector indexes. The time field is here because that
+	// agreement previously broke specifically for KindTime: AuditFields pinned
+	// nine fractional digits while the flat key, going through slog's
+	// JSONHandler, trims trailing zeros — same instant, different strings.
 	lg, buf := newTestLogger(t, slog.LevelInfo)
+	ts := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
 
 	chain, err := auditchain.New(testKey())
 	if err != nil {
 		t.Fatal(err)
 	}
-	fields := AuditFields(UserID("u_1"), Action("share_redeem"))
+	fields := AuditFields(UserID("u_1"), Action("share_redeem"), testExpiresAt(ts))
 	rec, err := chain.Append(context.Background(), func(auditchain.Record, auditchain.Anchor) error { return nil }, fields...)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lg.Audit(context.Background(), ShareRedeemed, rec, UserID("u_1"), Action("share_redeem"))
+	lg.Audit(context.Background(), ShareRedeemed, rec, UserID("u_1"), Action("share_redeem"), testExpiresAt(ts))
 
 	m := oneLine(t, buf)
+	if got := m["facility"]; got != float64(facilityAuthpriv) {
+		t.Errorf("facility = %v, want authpriv (%d)", got, facilityAuthpriv)
+	}
+	if _, present := m["audit_fields_mismatch"]; present {
+		t.Errorf("matching fields still set audit_fields_mismatch: %v", m["audit_fields_mismatch"])
+	}
 	raw, ok := m["fields"].([]any)
 	if !ok {
 		t.Fatalf("fields is %T, want an array: %v", m["fields"], m)
 	}
-	if len(raw) != 2 || raw[0] != "user_id=u_1" || raw[1] != "action=share_redeem" {
-		t.Errorf("fields = %v, want the digested pairs", raw)
+	want := []string{"user_id=u_1", "action=share_redeem", "audit_test_expires_at=2026-09-03T12:00:00Z"}
+	if len(raw) != len(want) {
+		t.Fatalf("fields = %v, want %v", raw, want)
+	}
+	for i, w := range want {
+		if raw[i] != w {
+			t.Errorf("fields[%d] = %v, want %q", i, raw[i], w)
+		}
 	}
 	if m["user_id"] != "u_1" {
 		t.Errorf("flat user_id = %v, does not agree with the digested field", m["user_id"])
 	}
 	if m["action"] != "share_redeem" {
 		t.Errorf("flat action = %v, does not agree with the digested field", m["action"])
+	}
+	if m["audit_test_expires_at"] != "2026-09-03T12:00:00Z" {
+		t.Errorf("flat audit_test_expires_at = %v, does not agree with the digested field", m["audit_test_expires_at"])
+	}
+}
+
+func TestAuditFieldsMismatchWithholdsFlatKeysAndMarksTheLine(t *testing.T) {
+	// A copy-paste slip or a reassigned variable between building fields for
+	// chain.Append and the fs passed to Audit must not ship a flat key that
+	// disagrees with what the record authenticated.
+	lg, buf := newTestLogger(t, slog.LevelInfo)
+
+	chain, err := auditchain.New(testKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fields := AuditFields(UserID("u_1"))
+	rec, err := chain.Append(context.Background(), func(auditchain.Record, auditchain.Anchor) error { return nil }, fields...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately diverge: the record digested u_1, Audit is handed u_2.
+	lg.Audit(context.Background(), ShareRedeemed, rec, UserID("u_2"))
+
+	m := oneLine(t, buf)
+	raw, ok := m["fields"].([]any)
+	if !ok || len(raw) != 1 || raw[0] != "user_id=u_1" {
+		t.Fatalf("fields = %v, want the digested record unchanged: [user_id=u_1]", m["fields"])
+	}
+	if _, present := m["user_id"]; present {
+		t.Errorf("mismatched line still carries the flat key user_id = %v", m["user_id"])
+	}
+	if mismatch, _ := m["audit_fields_mismatch"].(bool); !mismatch {
+		t.Errorf("audit_fields_mismatch = %v, want true", m["audit_fields_mismatch"])
 	}
 }
 
@@ -144,11 +210,19 @@ func TestATamperedShippedLineFailsVerification(t *testing.T) {
 	}
 	anchor := chain.Anchor()
 
-	tampered := strings.Replace(buf.String(), "user_id=u_2", "user_id=u_9", 1)
-	if tampered == buf.String() {
+	untampered := buf.String()
+	if err := auditchain.VerifyStream(key, records(strings.NewReader(untampered)), anchor); err != nil {
+		// If this fails, the assertion below would pass vacuously for the wrong
+		// reason — a broken anchor or a shape regression, not the tamper.
+		t.Fatalf("untampered shipped lines do not verify: %v\n%s", err, untampered)
+	}
+
+	tampered := strings.Replace(untampered, "user_id=u_2", "user_id=u_9", 1)
+	if tampered == untampered {
 		t.Fatal("the test did not actually change a digested field")
 	}
-	if err := auditchain.VerifyStream(key, records(strings.NewReader(tampered)), anchor); err == nil {
-		t.Error("a tampered line verified")
+	err = auditchain.VerifyStream(key, records(strings.NewReader(tampered)), anchor)
+	if !errors.Is(err, auditchain.ErrBrokenChain) {
+		t.Errorf("tampered stream error = %v, want auditchain.ErrBrokenChain", err)
 	}
 }

@@ -77,14 +77,17 @@ func (f Field) attr() slog.Attr {
 // reserved keys are set by the handler and may not be declared.
 //
 // The line keys would be duplicated; event and request_id each have exactly one source,
-// so a field of the same name could contradict them; and seq, prev, hash and fields are
+// so a field of the same name could contradict them; seq, prev, hash and fields are
 // the shape cmd/kyauditverify parses, so a field colliding with one would corrupt a chain
-// record on its way through the stream.
+// record on its way through the stream; and audit_fields_mismatch is Audit's own warning
+// that the flat keys on a line disagree with what the record's Fields digested — a field
+// of that name could claim a divergent line agrees after all.
 var reserved = map[string]bool{
 	"timestamp": true, "level": true, "message": true, "app": true,
 	"event": true, "request_id": true, "severity": true, "facility": true,
 	"dropped_fields": true, "truncated_fields": true,
 	"seq": true, "prev": true, "hash": true, "fields": true,
+	"audit_fields_mismatch": true,
 }
 
 var keyPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
