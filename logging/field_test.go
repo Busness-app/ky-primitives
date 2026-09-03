@@ -1,0 +1,144 @@
+package logging
+
+import (
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"strings"
+	"testing"
+)
+
+func TestSanitizeReplacesControlCharacters(t *testing.T) {
+	// Every one of these can forge a line or break a parser downstream.
+	for _, tc := range []struct{ name, in, want string }{
+		{"newline", "a\nb", "a�b"},
+		{"carriage return", "a\rb", "a�b"},
+		{"nul", "a\x00b", "a�b"},
+		{"escape", "a\x1bb", "a�b"},
+		{"delete", "a\x7fb", "a�b"},
+		{"tab", "a\tb", "a�b"},
+		{"invalid utf8", "a\xffb", "a�b"},
+		{"clean text is untouched", `a "quoted" ] \ b`, `a "quoted" ] \ b`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, truncated := sanitize(tc.in)
+			if got != tc.want {
+				t.Errorf("sanitize(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if truncated {
+				t.Errorf("sanitize(%q) reported truncation", tc.in)
+			}
+		})
+	}
+}
+
+func TestSanitizeCapsAtTheCeiling(t *testing.T) {
+	// 253 payload bytes plus the 3-byte ellipsis is the 256-byte ceiling.
+	const payload = maxValueBytes - len("…")
+
+	fits := strings.Repeat("a", payload)
+	if got, truncated := sanitize(fits); truncated || got != fits {
+		t.Errorf("a %d-byte value was truncated", payload)
+	}
+
+	over := strings.Repeat("a", payload+1)
+	got, truncated := sanitize(over)
+	if !truncated {
+		t.Fatal("a value past the budget was not reported as truncated")
+	}
+	if len(got) != maxValueBytes {
+		t.Errorf("truncated value is %d bytes, want exactly %d", len(got), maxValueBytes)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("truncated value %q does not end in the marker", got)
+	}
+}
+
+func TestSanitizeTruncatesOnARuneBoundary(t *testing.T) {
+	// Each rune is 3 bytes, so the budget does not divide evenly and the cut
+	// must fall between runes rather than through one.
+	got, truncated := sanitize(strings.Repeat("世", 200))
+	if !truncated {
+		t.Fatal("want truncation")
+	}
+	if strings.ContainsRune(got, '�') {
+		t.Errorf("truncation split a rune: %q", got)
+	}
+	if len(got) > maxValueBytes {
+		t.Errorf("truncated value is %d bytes, over the %d ceiling", len(got), maxValueBytes)
+	}
+}
+
+func TestDeclareRefusesBadNames(t *testing.T) {
+	for _, tc := range []struct{ name, key string }{
+		{"reserved: audit key", "hash"},
+		{"reserved: line key", "message"},
+		{"reserved: single source", "request_id"},
+		{"uppercase", "UserName"},
+		{"leading digit", "1st_try"},
+		{"hyphen", "user-id"},
+		{"dot", "user.id"},
+		{"empty", ""},
+		{"already declared", "user_id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("DeclareString(%q) did not panic", tc.key)
+				}
+			}()
+			DeclareString(tc.key)
+		})
+	}
+}
+
+func TestDeclaredConstructorSanitizes(t *testing.T) {
+	f := UserID("u_1\nfake")
+	if got := f.val.v.String(); got != "u_1�fake" {
+		t.Errorf("UserID kept a control character: %q", got)
+	}
+	if f.key != "user_id" {
+		t.Errorf("key = %q, want user_id", f.key)
+	}
+}
+
+func TestReservedKeysAreNotDeclared(t *testing.T) {
+	// A reserved key that is also declared would have two sources and no rule
+	// about which wins.
+	for key := range reserved {
+		if isDeclared(key) {
+			t.Errorf("%q is both reserved and declared", key)
+		}
+	}
+}
+
+func TestErrDropsTheWrappingAndKeepsTheKind(t *testing.T) {
+	// Wrapping is where paths, queries and tokens get added; the leaf is a
+	// sentinel with constant text.
+	wrapped := fmt.Errorf("opening /etc/kypassword/secret.key: %w", fs.ErrNotExist)
+
+	kind := Err(wrapped)
+	if got := kind.val.v.String(); got != fs.ErrNotExist.Error() {
+		t.Errorf("Err = %q, want the leaf sentinel %q", got, fs.ErrNotExist.Error())
+	}
+	if strings.Contains(kind.val.v.String(), "secret.key") {
+		t.Error("Err leaked the wrapped path")
+	}
+	if kind.key != "error_kind" {
+		t.Errorf("key = %q, want error_kind", kind.key)
+	}
+
+	text := ErrText(wrapped)
+	if !strings.Contains(text.val.v.String(), "secret.key") {
+		t.Error("ErrText dropped the message it exists to carry")
+	}
+	if text.key != "error_text" {
+		t.Errorf("key = %q, want error_text", text.key)
+	}
+}
+
+func TestErrOfNilContributesNothing(t *testing.T) {
+	if got := Err(nil).attr(); !got.Equal(slog.Attr{}) {
+		t.Errorf("Err(nil) = %v, want the empty attr", got)
+	}
+}
