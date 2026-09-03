@@ -60,4 +60,7 @@ func TestHPKEInfoIsTheContainerFormat(t *testing.T) {
 	if string(hpkeInfo()) != KycapFileFormat {
 		t.Fatalf("info = %q, want %q", hpkeInfo(), KycapFileFormat)
 	}
+	if KycapFileFormat != "kycap/3" {
+		t.Fatalf("KycapFileFormat = %q, want kycap/3", KycapFileFormat)
+	}
 }

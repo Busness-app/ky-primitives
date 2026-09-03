@@ -1,13 +1,16 @@
 // Package capsule reads and writes the suite's encrypted backup container.
 //
-// The container is kycap/2: a JSON object holding the manifest, a base64 ciphertext with
-// the nonce prefixed, and nothing else. The manifest is bound into the AEAD, so every
-// field describing the capsule is authenticated rather than merely present.
+// The container is kycap/3: a JSON object holding the manifest and a base64 ciphertext,
+// and nothing else. The payload is sealed to the suite recovery public key through HPKE;
+// there is no per-capsule symmetric key and no nonce carried in the container — HPKE
+// derives it from the encapsulated key and the key schedule. The manifest is bound in as
+// the AEAD's additional authenticated data, so every field describing the capsule is
+// authenticated rather than merely present.
 //
-// Two containers came before it — kysignon-server's kycap/1 and kyrecovery-server's tar —
-// and both are retired. Each authenticated its ciphertext and left the manifest outside
-// the AEAD, which made the recovery topology a capsule advertises editable by anyone who
-// could reach the file.
+// Two containers came before it and both are retired: kysignon-server's kycap/1 and
+// kyrecovery-server's tar, which authenticated their ciphertext and left the manifest
+// outside the AEAD, so the recovery topology a capsule advertises could be rewritten by
+// anyone who could reach the file. kycap/2 fixed that and still handed back a raw key.
 //
 // The payload is a gzipped tar of the backed-up files, extracted through the hardening in
 // extract.go.

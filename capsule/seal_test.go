@@ -47,8 +47,8 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	}
 }
 
-// kycap/2 binds the manifest into the AEAD, and is the only container this package knows.
-func TestSealWritesKycap2(t *testing.T) {
+// kycap/3 binds the manifest into the AEAD, and is the only container this package knows.
+func TestSealWritesKycap3(t *testing.T) {
 	priv := testRecoveryKey(t)
 	raw, _, err := capsule.Seal("fixture", "0.0.0",
 		[]capsule.File{{Path: "a.txt", Content: []byte("a"), Mode: 0600}}, nil, nil, 2, 3, priv.Public())
