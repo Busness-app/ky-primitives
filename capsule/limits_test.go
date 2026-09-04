@@ -21,10 +21,10 @@ func TestExtractionBudgetsFitAServer(t *testing.T) {
 		got  int64
 		want int64
 	}{
-		{"maxCapsuleExpandedTotal", maxCapsuleExpandedTotal, 256 << 20},
-		{"maxCapsuleFileBytes", maxCapsuleFileBytes, 64 << 20},
-		{"maxContainerBytes", int64(maxContainerBytes), 384 << 20},
-		{"maxCapsuleFiles", int64(maxCapsuleFiles), 4096},
+		{"MaxExpandedBytes", MaxExpandedBytes, 256 << 20},
+		{"MaxFileBytes", MaxFileBytes, 64 << 20},
+		{"MaxContainerBytes", int64(MaxContainerBytes), 384 << 20},
+		{"MaxFiles", int64(MaxFiles), 4096},
 	} {
 		if tc.got != tc.want {
 			t.Errorf("%s is %d bytes, the documented budget is %d; raising it is a policy change",
@@ -34,23 +34,23 @@ func TestExtractionBudgetsFitAServer(t *testing.T) {
 
 	// The relation still has to hold, and it is not implied by the values above once any
 	// of them is edited.
-	if maxCapsuleFileBytes > maxCapsuleExpandedTotal {
-		t.Errorf("a single member may be %d bytes but the whole archive only %d", maxCapsuleFileBytes, maxCapsuleExpandedTotal)
+	if MaxFileBytes > MaxExpandedBytes {
+		t.Errorf("a single member may be %d bytes but the whole archive only %d", MaxFileBytes, MaxExpandedBytes)
 	}
 }
 
 // buildPayload's doc comment says every limit Open enforces is enforced here too, bar the
-// manifest bound Seal applies separately -- meaning maxContainerBytes, which parseContainer
+// manifest bound Seal applies separately -- meaning MaxContainerBytes, which parseContainer
 // enforces on the whole container and on the encoded ciphertext, can never be reached by a
 // container buildPayload produces. That holds only by arithmetic today: a
-// maxCapsuleExpandedTotal plaintext base64-expands to less than maxContainerBytes even
+// MaxExpandedBytes plaintext base64-expands to less than MaxContainerBytes even
 // after adding a full maxManifestBytes manifest, with about 40 MiB to spare. Nothing in the
 // code enforces that margin, so this pins it: if a future edit to any of the four constants
 // closes the gap, this fails instead of buildPayload's doc comment silently going false.
 func TestContainerBoundExceedsWhatSealCanProduce(t *testing.T) {
-	encodedCiphertext := int64(base64.StdEncoding.EncodedLen(int(maxCapsuleExpandedTotal)))
-	if encodedCiphertext+maxManifestBytes >= int64(maxContainerBytes) {
-		t.Fatalf("base64(expanded total) %d + manifest bound %d = %d, at or past maxContainerBytes %d",
-			encodedCiphertext, int64(maxManifestBytes), encodedCiphertext+maxManifestBytes, maxContainerBytes)
+	encodedCiphertext := int64(base64.StdEncoding.EncodedLen(int(MaxExpandedBytes)))
+	if encodedCiphertext+maxManifestBytes >= int64(MaxContainerBytes) {
+		t.Fatalf("base64(expanded total) %d + manifest bound %d = %d, at or past MaxContainerBytes %d",
+			encodedCiphertext, int64(maxManifestBytes), encodedCiphertext+maxManifestBytes, MaxContainerBytes)
 	}
 }

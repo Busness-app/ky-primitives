@@ -36,10 +36,10 @@ const maxManifestBytes = 1 << 20
 // — Seal refuses a list past this, and Open refuses to read one.
 const maxFileListBytes = maxManifestBytes
 
-// maxContainerBytes bounds attacker-controlled input before JSON parsing and base64
+// MaxContainerBytes bounds attacker-controlled input before JSON parsing and base64
 // decoding can make additional copies of it. The plaintext ceiling is 256 MiB; this leaves
 // room for base64 expansion, the manifest and archive framing.
-const maxContainerBytes = 384 << 20
+const MaxContainerBytes = 384 << 20
 
 // manifest is the authenticated description of a capsule. It is carried and authenticated
 // as the exact bytes that were read, never a re-encoding of this struct — see kycapFile.
@@ -145,8 +145,8 @@ func decryptPayload(raw []byte, with recoverykey.PrivateKey) (manifest, []byte, 
 }
 
 func checkContainerSize(part string, size int) error {
-	if size > maxContainerBytes {
-		return fmt.Errorf("%w: %s is %d bytes, limit is %d", ErrCapsuleTooLarge, part, size, maxContainerBytes)
+	if size > MaxContainerBytes {
+		return fmt.Errorf("%w: %s is %d bytes, limit is %d", ErrCapsuleTooLarge, part, size, MaxContainerBytes)
 	}
 	return nil
 }

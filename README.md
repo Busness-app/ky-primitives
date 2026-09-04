@@ -114,8 +114,11 @@ and any restore into a non-empty directory. File modes are clamped to owner-only
 restored capsule carries signing keys, and an archive header is attacker-controlled.
 
 The two size numbers are memory budgets rather than archive sizes, because `Open` holds
-the raw container, the decrypted payload and every expanded member at once. They are the
-values `capsule/extract.go` enforces; raising them is what a streaming `Open` is for.
+the raw container, the decrypted payload and every expanded member at once. They are
+`capsule.MaxFiles`, `capsule.MaxFileBytes` and `capsule.MaxExpandedBytes` (and
+`capsule.MaxContainerBytes`, the cap on a container before it is parsed), the
+values `capsule/extract.go` enforces, exported so a consumer can name the limit it hit;
+raising them is what a streaming `Open` is for.
 
 Every refusal in that list is covered by a test in `capsule/hardening_test.go` or
 `capsule/review_test.go`, with one exception: the 256 MiB expansion budget and the 64 MiB

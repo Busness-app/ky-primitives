@@ -48,7 +48,7 @@ func payloadFailingPartway(t *testing.T) []byte {
 func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 	t.Run("more files than Open permits", func(t *testing.T) {
 		priv := testRecoveryKey(t)
-		files := make([]File, maxCapsuleFiles+1)
+		files := make([]File, MaxFiles+1)
 		for i := range files {
 			files[i] = File{Path: fmt.Sprintf("f%05d", i), Content: []byte("x"), Mode: 0600}
 		}
@@ -79,7 +79,7 @@ func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 	// what Open would refuse here too.
 	t.Run("file list past what Open permits", func(t *testing.T) {
 		priv := testRecoveryKey(t)
-		files := make([]File, maxCapsuleFiles)
+		files := make([]File, MaxFiles)
 		for i := range files {
 			files[i] = File{Path: fmt.Sprintf("%04d", i) + strings.Repeat("p", 196), Content: []byte("x"), Mode: 0600}
 		}
@@ -94,7 +94,7 @@ func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 
 	t.Run("exactly the limit still seals", func(t *testing.T) {
 		priv := testRecoveryKey(t)
-		files := make([]File, maxCapsuleFiles)
+		files := make([]File, MaxFiles)
 		for i := range files {
 			files[i] = File{Path: fmt.Sprintf("f%05d", i), Content: []byte("x"), Mode: 0600}
 		}
@@ -106,8 +106,8 @@ func TestSealRefusesWhatOpenWouldRefuse(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Open refused a capsule Seal wrote: %v", err)
 		}
-		if len(got) != maxCapsuleFiles {
-			t.Fatalf("round tripped %d files, want %d", len(got), maxCapsuleFiles)
+		if len(got) != MaxFiles {
+			t.Fatalf("round tripped %d files, want %d", len(got), MaxFiles)
 		}
 	})
 }
@@ -188,9 +188,9 @@ func TestSealRefusesAnOversizedMember(t *testing.T) {
 	// buildPayload measures int64(len(f.Content)) directly, so unlike extraction -- which
 	// bounds a declared hdr.Size from an attacker-controlled tar header -- there is no
 	// declared length to lie about here. Exercising the check needs a real allocation over
-	// maxCapsuleFileBytes.
+	// MaxFileBytes.
 	priv := testRecoveryKey(t)
-	content := make([]byte, maxCapsuleFileBytes+1)
+	content := make([]byte, MaxFileBytes+1)
 	_, _, err := Seal("t", "1", []File{{Path: "big", Content: content, Mode: 0600}}, nil, nil, 2, 3, priv.Public())
 	content = nil
 	if !errors.Is(err, ErrCapsuleTooLarge) {

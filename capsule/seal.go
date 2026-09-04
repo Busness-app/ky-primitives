@@ -133,8 +133,8 @@ func Seal(serviceName, appVersion string, files []File, deps, recipe map[string]
 // They are also written here, as the reserved member, so the list the key protects and the
 // list Seal returns are one encoding of one slice.
 func buildPayload(files []File) ([]byte, []FileEntry, error) {
-	if len(files) > maxCapsuleFiles {
-		return nil, nil, fmt.Errorf("%w: %d files, Open permits %d", ErrCapsuleTooLarge, len(files), maxCapsuleFiles)
+	if len(files) > MaxFiles {
+		return nil, nil, fmt.Errorf("%w: %d files, Open permits %d", ErrCapsuleTooLarge, len(files), MaxFiles)
 	}
 	var total int64
 	seen := make(map[string]struct{}, len(files))
@@ -157,12 +157,12 @@ func buildPayload(files []File) ([]byte, []FileEntry, error) {
 		seen[name] = struct{}{}
 
 		size := int64(len(f.Content))
-		if size > maxCapsuleFileBytes {
-			return nil, nil, fmt.Errorf("%w: %q is %d bytes, Open permits %d", ErrCapsuleTooLarge, name, size, maxCapsuleFileBytes)
+		if size > MaxFileBytes {
+			return nil, nil, fmt.Errorf("%w: %q is %d bytes, Open permits %d", ErrCapsuleTooLarge, name, size, MaxFileBytes)
 		}
 		total += size
-		if total > maxCapsuleExpandedTotal {
-			return nil, nil, fmt.Errorf("%w: payload exceeds %d bytes", ErrCapsuleTooLarge, maxCapsuleExpandedTotal)
+		if total > MaxExpandedBytes {
+			return nil, nil, fmt.Errorf("%w: payload exceeds %d bytes", ErrCapsuleTooLarge, MaxExpandedBytes)
 		}
 		mode := f.Mode.Perm() & 0700
 		if mode == 0 {
@@ -201,8 +201,8 @@ func buildPayload(files []File) ([]byte, []FileEntry, error) {
 	if len(list) > maxFileListBytes {
 		return nil, nil, fmt.Errorf("%w: file list is %d bytes, Open permits %d", ErrCapsuleTooLarge, len(list), maxFileListBytes)
 	}
-	if total+int64(len(list)) > maxCapsuleExpandedTotal {
-		return nil, nil, fmt.Errorf("%w: payload exceeds %d bytes", ErrCapsuleTooLarge, maxCapsuleExpandedTotal)
+	if total+int64(len(list)) > MaxExpandedBytes {
+		return nil, nil, fmt.Errorf("%w: payload exceeds %d bytes", ErrCapsuleTooLarge, MaxExpandedBytes)
 	}
 	if err := tw.WriteHeader(&tar.Header{
 		Name:     reservedFileList,
