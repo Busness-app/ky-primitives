@@ -24,12 +24,15 @@ import (
 // on, which meant a hostile capsule OOM-killed the process instead of receiving
 // ErrCapsuleTooLarge. A capsule holds keys and configuration; it is kilobytes in practice.
 //
+// Exported so a consumer can map ErrCapsuleTooLarge to a message naming the limit without
+// mirroring the numbers.
+//
 // ponytail: raise these only alongside a streaming Open that does not materialise every
 // member, because that is the thing the numbers are really standing in for.
 const (
-	maxCapsuleFiles         = 4096
-	maxCapsuleFileBytes     = int64(64 << 20)  // 64 MiB for any single member
-	maxCapsuleExpandedTotal = int64(256 << 20) // 256 MiB across the whole archive
+	MaxFiles         = 4096
+	MaxFileBytes     = int64(64 << 20)  // 64 MiB for any single member
+	MaxExpandedBytes = int64(256 << 20) // 256 MiB across the whole archive
 )
 
 // reservedFileList is the payload member carrying the encoded []FileEntry. It is metadata,
@@ -61,7 +64,7 @@ func extractPayload(payload []byte, targetDir string) ([]File, []FileEntry, erro
 
 	// The gzip stream is the only place total expansion can be bounded once and for all;
 	// per-entry caps alone still allow an unbounded number of entries.
-	budget := &countingReader{r: io.LimitReader(gr, maxCapsuleExpandedTotal+1), limit: maxCapsuleExpandedTotal}
+	budget := &countingReader{r: io.LimitReader(gr, MaxExpandedBytes+1), limit: MaxExpandedBytes}
 	tr := tar.NewReader(budget)
 
 	root, created, err := prepareTargetDir(targetDir)
@@ -107,7 +110,7 @@ func extractPayload(payload []byte, targetDir string) ([]File, []FileEntry, erro
 		}
 
 		// Before the file count, because the list is not one of the files: a capsule
-		// holding exactly maxCapsuleFiles members plus its list is one Seal writes.
+		// holding exactly MaxFiles members plus its list is one Seal writes.
 		// A second member under this name is refused rather than allowed to shadow the
 		// first — no caller can produce the name, so two of them is a crafted payload.
 		if hdr.Name == reservedFileList {
@@ -122,10 +125,10 @@ func extractPayload(payload []byte, targetDir string) ([]File, []FileEntry, erro
 			continue
 		}
 
-		if len(files) >= maxCapsuleFiles {
-			return nil, nil, fmt.Errorf("%w: more than %d files", ErrCapsuleTooLarge, maxCapsuleFiles)
+		if len(files) >= MaxFiles {
+			return nil, nil, fmt.Errorf("%w: more than %d files", ErrCapsuleTooLarge, MaxFiles)
 		}
-		if hdr.Size < 0 || hdr.Size > maxCapsuleFileBytes {
+		if hdr.Size < 0 || hdr.Size > MaxFileBytes {
 			return nil, nil, fmt.Errorf("%w: %s declares %d bytes", ErrCapsuleTooLarge, hdr.Name, hdr.Size)
 		}
 
@@ -140,11 +143,11 @@ func extractPayload(payload []byte, targetDir string) ([]File, []FileEntry, erro
 
 		// LimitReader caps what a lying header can actually deliver; the +1 byte is how an
 		// over-long entry is detected rather than silently truncated.
-		data, err := io.ReadAll(io.LimitReader(tr, maxCapsuleFileBytes+1))
+		data, err := io.ReadAll(io.LimitReader(tr, MaxFileBytes+1))
 		if err != nil {
 			return nil, nil, err
 		}
-		if int64(len(data)) > maxCapsuleFileBytes {
+		if int64(len(data)) > MaxFileBytes {
 			return nil, nil, fmt.Errorf("%w: %s", ErrCapsuleTooLarge, hdr.Name)
 		}
 

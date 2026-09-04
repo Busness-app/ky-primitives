@@ -117,7 +117,7 @@ func TestExtractRefusesNonEmptyTarget(t *testing.T) {
 func TestExtractRejectsTooManyFiles(t *testing.T) {
 	var hdrs []*tar.Header
 	var bodies [][]byte
-	for i := 0; i <= maxCapsuleFiles; i++ {
+	for i := 0; i <= MaxFiles; i++ {
 		hdrs = append(hdrs, &tar.Header{
 			Name:     fmt.Sprintf("d/f%d.txt", i),
 			Mode:     0600,
