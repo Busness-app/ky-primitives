@@ -115,7 +115,8 @@ restored capsule carries signing keys, and an archive header is attacker-control
 
 The two size numbers are memory budgets rather than archive sizes, because `Open` holds
 the raw container, the decrypted payload and every expanded member at once. They are
-`capsule.MaxFiles`, `capsule.MaxFileBytes` and `capsule.MaxExpandedBytes`, the
+`capsule.MaxFiles`, `capsule.MaxFileBytes` and `capsule.MaxExpandedBytes` (and
+`capsule.MaxContainerBytes`, the cap on a container before it is parsed), the
 values `capsule/extract.go` enforces, exported so a consumer can name the limit it hit;
 raising them is what a streaming `Open` is for.
 
