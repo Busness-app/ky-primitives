@@ -297,15 +297,22 @@ vectors are 0x11d, and `ParseShare` accepts only the `ky2-` string form. gridloc
 did this.
 
 **`scripts/ky-init.sh` needs one change.** The module `sed` at `:42` is safe — the two
-paths do not prefix-collide — but `go mod tidy` at `:62` must now resolve a module under
-the `Busness-app` org. Without `GOPRIVATE=github.com/Busness-app` or equivalent, the
-scaffold will not build on first run on a machine without ambient GitHub credentials.
-While there: `MODULE_OLD` at `:38` is hardcoded, which is why gridlock's copy had to be
-hand-edited. Derive it with `go list -m`.
+paths do not prefix-collide. `MODULE_OLD` at `:38` is hardcoded, which is why gridlock's
+copy had to be hand-edited; derive it with `go list -m`. (An earlier draft said `go mod
+tidy` at `:62` would need `GOPRIVATE`; it does not — `ky-primitives` is a public module and
+resolves through the proxy. Corrected 2026-09-03.)
 
 **Re-fork gridlock** against the migrated scaffold. `internal/crypto/crypto.go`,
-`internal/auth/totp.go` and `internal/auth/recovery.go` are byte-identical to the base's
-(verified with `diff -q`), so the reconciliation is mechanical for those three.
+`internal/auth/totp.go` and `internal/auth/recovery.go` were byte-identical to the base's
+(verified with `diff -q`) before the migration; the scaffold's migration rewrites all three,
+so they arrive with the fresh tree and need no reconciliation.
+
+Planned 2026-09-03 as two documents in `ky_server_base/docs/superpowers/plans/`:
+`2026-09-03-scaffold-adopts-ky-primitives.md` and `2026-09-03-gridlock-refork.md`. The
+decisions those plans take beyond this section (drill seals to a throwaway keypair; the kit
+export becomes a `.kycap` download; the public key and k/n arrive in the pairing claim
+response, so pairing is red until Phase 5; gridlock's hand-rolled SCIM is dropped for the
+scaffold's, flagged) are tabled at the top of each plan.
 
 ---
 
