@@ -262,7 +262,7 @@ func TestFilterIsEscapedAndAttributeRestricted(t *testing.T) {
 	var gotFilter string
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotFilter = r.URL.Query().Get("filter")
-		_, _ = w.Write([]byte(`{"totalResults":1,"Resources":[{"id":"1"}]}`))
+		_ = json.NewEncoder(w).Encode(map[string]any{"totalResults": 1, "Resources": []User{{ID: "1", UserName: `a"b\c or userName pr`}}})
 	}))
 	defer srv.Close()
 	c := &Client{BaseURL: srv.URL, Token: token, HTTPClient: srv.Client()}
@@ -273,7 +273,7 @@ func TestFilterIsEscapedAndAttributeRestricted(t *testing.T) {
 		t.Fatalf("filter %q, want %q", gotFilter, want)
 	}
 	gotFilter = ""
-	for _, attr := range []string{"", `userName eq "x" or`, "user name", "1abc", "name.givenName\n"} {
+	for _, attr := range []string{"", `userName eq "x" or`, "displayName", "emails.value", "externalid"} {
 		if _, err := c.FindUser(context.Background(), attr, "v"); err == nil {
 			t.Fatalf("attribute %q accepted", attr)
 		}
@@ -351,11 +351,13 @@ func TestRedirectIsRefusedAndTokenNotReplayed(t *testing.T) {
 	// One client trusting both certificates would follow if the redirect policy allowed it.
 	c := &Client{BaseURL: bouncer.URL, Token: token, HTTPClient: bouncer.Client()}
 	_, err := c.CreateUser(context.Background(), User{UserName: "x"})
-	if err == nil || !strings.Contains(err.Error(), "redirect") {
-		t.Fatalf("want a redirect refusal, got %v", err)
-	}
+	// Go copies Authorization to a redirect on the same hostname, port aside, so without the
+	// client's own refusal this sink does receive the bearer. Checked first: it is the claim.
 	if leaked {
 		t.Fatal("bearer token followed the redirect")
+	}
+	if err == nil || !strings.Contains(err.Error(), "redirect") {
+		t.Fatalf("want a redirect refusal, got %v", err)
 	}
 }
 
@@ -444,5 +446,109 @@ func TestPatchWireShape(t *testing.T) {
 	}
 	if _, err := c.PatchUser(context.Background(), "1"); err == nil {
 		t.Fatal("a PATCH with no operations was sent")
+	}
+}
+
+func TestRetryAfterIsBoundedAndNonNegative(t *testing.T) {
+	cases := map[string]time.Duration{
+		"":                     0,
+		"7":                    7 * time.Second,
+		"3600":                 time.Hour,
+		"3601":                 time.Hour,
+		"9000000000":           time.Hour,
+		"10000000000":          time.Hour,
+		"99999999999999999999": 0, // overflows the parser: garbage, so no hint
+		"-5":                   0,
+		"soon":                 0,
+		time.Now().Add(-time.Minute).UTC().Format(http.TimeFormat):   0,
+		time.Now().Add(48 * time.Hour).UTC().Format(http.TimeFormat): time.Hour,
+	}
+	for in, want := range cases {
+		if got := retryAfter(in); got != want {
+			t.Errorf("retryAfter(%q) = %v, want %v", in, got, want)
+		}
+	}
+	if got := retryAfter(time.Now().Add(10 * time.Second).UTC().Format(http.TimeFormat)); got <= 0 || got > 10*time.Second {
+		t.Errorf("near-future date gave %v", got)
+	}
+}
+
+func TestUnexpectedStatusesAreNotSuccess(t *testing.T) {
+	var status int
+	var body string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: token, HTTPClient: srv.Client()}
+	ctx := context.Background()
+	// A 3xx without Location is handed back as a response, not followed. 1xx never reaches
+	// the client as a final status, so it is not here.
+	for _, status = range []int{302, 202, 206, 304} {
+		if err := c.DeleteUser(ctx, "1"); !errors.Is(err, ErrMalformedResponse) {
+			t.Errorf("DeleteUser on %d: want ErrMalformedResponse, got %v", status, err)
+		}
+	}
+	status = 200
+	for _, body = range []string{"", "<html>portal</html>", `[]`, `"ok"`} {
+		if err := c.Ping(ctx); !errors.Is(err, ErrMalformedResponse) {
+			t.Errorf("Ping on 200 %q: want ErrMalformedResponse, got %v", body, err)
+		}
+	}
+	body = ` {"patch":{"supported":true}}`
+	if err := c.Ping(ctx); err != nil {
+		t.Errorf("Ping on a JSON object: %v", err)
+	}
+}
+
+func TestTokenIsRedactedFromErrorDetail(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeErr(w, 401, "invalid "+token, "token "+token+" was rejected; also "+token)
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: token, HTTPClient: srv.Client()}
+	err := c.Ping(context.Background())
+	var se *Error
+	if !errors.As(err, &se) || !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("got %v", err)
+	}
+	if strings.Contains(err.Error(), token) || strings.Contains(se.Detail, token) || strings.Contains(se.ScimType, token) {
+		t.Fatalf("token survived redaction: %q / %q", se.ScimType, se.Detail)
+	}
+	if se.Detail != "token [token] was rejected; also [token]" || se.ScimType != "invalid [token]" {
+		t.Fatalf("unexpected redaction: %q / %q", se.ScimType, se.Detail)
+	}
+}
+
+func TestFindUserRefusesAUserThatDoesNotMatch(t *testing.T) {
+	// A server that ignores the filter and returns its one user, with an honest total.
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"totalResults": 1, "Resources": []User{{ID: "srv-9", ExternalID: "someone-else", UserName: "Carol"}}})
+	}))
+	defer srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: token, HTTPClient: srv.Client()}
+	ctx := context.Background()
+	if _, err := c.FindUser(ctx, "externalId", "local-42"); !errors.Is(err, ErrMalformedResponse) {
+		t.Fatalf("unrelated user by externalId: want ErrMalformedResponse, got %v", err)
+	}
+	if _, err := c.FindUser(ctx, "userName", "alice"); !errors.Is(err, ErrMalformedResponse) {
+		t.Fatalf("unrelated user by userName: want ErrMalformedResponse, got %v", err)
+	}
+	if u, err := c.FindUser(ctx, "userName", "carol"); err != nil || u.ID != "srv-9" {
+		t.Fatalf("userName is not caseExact; got %v %+v", err, u)
+	}
+	if _, err := c.FindUser(ctx, "externalId", "SOMEONE-ELSE"); !errors.Is(err, ErrMalformedResponse) {
+		t.Fatalf("externalId is caseExact; got %v", err)
+	}
+}
+
+func TestTransportErrorsDoNotCarryTheQuery(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close()
+	c := &Client{BaseURL: srv.URL, Token: token, HTTPClient: srv.Client()}
+	_, err := c.FindUser(context.Background(), "externalId", "person-42")
+	if err == nil || strings.Contains(err.Error(), "person-42") || strings.Contains(err.Error(), "filter") {
+		t.Fatalf("query leaked into the transport error: %v", err)
 	}
 }

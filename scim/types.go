@@ -93,12 +93,13 @@ var (
 	ErrNoToken = errors.New("scim: bearer token is required")
 )
 
-// Error is a non-2xx response. Detail is the server's text made printable and cut short,
-// so it can reach a log or an audit record as it is.
+// Error is a non-2xx response. Detail is the server's text with the bearer token redacted,
+// made printable and cut short, so it can reach a log or an audit record as it is.
 type Error struct {
-	Status     int
-	ScimType   string
-	Detail     string
+	Status   int
+	ScimType string
+	Detail   string
+	// RetryAfter is the server's Retry-After hint, zero when absent, capped at one hour.
 	RetryAfter time.Duration
 }
 

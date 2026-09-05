@@ -4,11 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -28,15 +28,22 @@ type Client struct {
 	HTTPClient *http.Client
 }
 
-// Ping fetches ServiceProviderConfig, which proves the URL is a SCIM root and the token is
-// accepted without touching a user.
+// Ping fetches ServiceProviderConfig, which proves the URL answers as a SCIM root and the
+// token is accepted, without touching a user. Any HTTPS endpoint can return an empty 200, so
+// the body must be a JSON object.
 func (c *Client) Ping(ctx context.Context) error {
 	u, err := c.endpoint("", "ServiceProviderConfig")
 	if err != nil {
 		return err
 	}
-	var probe struct{}
-	return c.do(ctx, http.MethodGet, u, nil, &probe)
+	var probe json.RawMessage
+	if err := c.do(ctx, http.MethodGet, u, nil, &probe); err != nil {
+		return err
+	}
+	if probe = bytes.TrimSpace(probe); len(probe) == 0 || probe[0] != '{' {
+		return fmt.Errorf("%w: ServiceProviderConfig is not a JSON object", ErrMalformedResponse)
+	}
+	return nil
 }
 
 // CreateUser POSTs the user and returns the resource the server minted. The returned ID is
@@ -67,14 +74,14 @@ func (c *Client) GetUser(ctx context.Context, id string) (User, error) {
 	return out, c.do(ctx, http.MethodGet, u, nil, &out)
 }
 
-var attributePath = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9.]*$`)
-
-// FindUser looks a user up by an equality filter on one attribute, "externalId" or
-// "userName" in practice. Zero matches is ErrNotFound; more than one is ErrAmbiguous, since a
-// caller that took the first would act on the wrong account.
+// FindUser looks a user up by an equality filter on "externalId" or "userName", the two
+// attributes the result can be checked against. Zero matches is ErrNotFound; more than one is
+// ErrAmbiguous; one that does not carry the value is ErrMalformedResponse, because a server
+// without filtering returns its collection, and one unrelated user in it must not become the
+// account that is deactivated next.
 func (c *Client) FindUser(ctx context.Context, attribute, value string) (User, error) {
-	if !attributePath.MatchString(attribute) {
-		return User{}, fmt.Errorf("scim: filter attribute %q is not a plain attribute path", attribute)
+	if attribute != "externalId" && attribute != "userName" {
+		return User{}, fmt.Errorf("scim: FindUser supports externalId and userName, not %q", attribute)
 	}
 	quoted := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value)
 	u, err := c.endpoint(attribute+` eq "`+quoted+`"`, "Users")
@@ -94,7 +101,12 @@ func (c *Client) FindUser(ctx context.Context, attribute, value string) (User, e
 	case len(list.Resources) > 1 || list.TotalResults > 1:
 		return User{}, ErrAmbiguous
 	}
-	return list.Resources[0], nil
+	found := list.Resources[0]
+	// userName is not caseExact in the core schema; externalId is.
+	if attribute == "externalId" && found.ExternalID != value || attribute == "userName" && !strings.EqualFold(found.UserName, value) {
+		return User{}, fmt.Errorf("%w: the user returned does not match the filter", ErrMalformedResponse)
+	}
+	return found, nil
 }
 
 // ReplaceUser PUTs the whole user under the server's ID.
@@ -199,7 +211,12 @@ func (c *Client) do(ctx context.Context, method, target string, in, out any) err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		// url.Error carries the full URL, and FindUser's query names a user.
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			err = uerr.Err
+		}
+		return fmt.Errorf("scim: %s %s: %w", method, req.URL.Path, err)
 	}
 	defer resp.Body.Close()
 
@@ -208,7 +225,12 @@ func (c *Client) do(ctx context.Context, method, target string, in, out any) err
 		return fmt.Errorf("%w: %v", ErrMalformedResponse, err)
 	}
 	if resp.StatusCode >= 400 {
-		return remoteError(resp, raw)
+		return c.remoteError(resp, raw)
+	}
+	// A 3xx without Location, a 1xx, or a 202 from something that is not a SCIM server is
+	// not the outcome the caller asked for, and a delete recorded on it never happened.
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("%w: status %d", ErrMalformedResponse, resp.StatusCode)
 	}
 	if len(raw) > maxBody {
 		return fmt.Errorf("%w: body exceeds %d bytes", ErrMalformedResponse, maxBody)
@@ -223,30 +245,34 @@ func (c *Client) do(ctx context.Context, method, target string, in, out any) err
 }
 
 // remoteError reads the RFC 7644 error body when there is one. The status comes from the
-// response line, not the body, so a body that lies or is not JSON still classifies.
-func remoteError(resp *http.Response, raw []byte) error {
+// response line, not the body, so a body that lies or is not JSON still classifies. Gateways
+// echo the credential they rejected, so the token is redacted before the text can be logged.
+func (c *Client) remoteError(resp *http.Response, raw []byte) error {
 	e := &Error{Status: resp.StatusCode, RetryAfter: retryAfter(resp.Header.Get("Retry-After"))}
 	var body struct {
 		ScimType string `json:"scimType"`
 		Detail   string `json:"detail"`
 	}
 	if json.Unmarshal(raw, &body) == nil {
-		e.ScimType, e.Detail = printable(body.ScimType), printable(body.Detail)
+		redact := func(s string) string { return printable(strings.ReplaceAll(s, c.Token, "[token]")) }
+		e.ScimType, e.Detail = redact(body.ScimType), redact(body.Detail)
 	}
 	return e
 }
 
+// maxRetryAfter caps the server's hint. A caller that sleeps on it must not be parked for
+// years, or handed a negative duration by an overflowed one, by the server it is retrying.
+const maxRetryAfter = time.Hour
+
 func retryAfter(h string) time.Duration {
-	if h == "" {
-		return 0
-	}
-	if secs, err := strconv.Atoi(h); err == nil && secs > 0 {
-		return time.Duration(secs) * time.Second
-	}
-	if t, err := http.ParseTime(h); err == nil {
-		if d := time.Until(t); d > 0 {
-			return d
+	var d time.Duration
+	if secs, err := strconv.ParseInt(h, 10, 64); err == nil {
+		if secs > int64(maxRetryAfter/time.Second) {
+			return maxRetryAfter
 		}
+		d = time.Duration(secs) * time.Second
+	} else if t, err := http.ParseTime(h); err == nil {
+		d = time.Until(t)
 	}
-	return 0
+	return max(0, min(d, maxRetryAfter))
 }
