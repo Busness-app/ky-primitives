@@ -104,8 +104,16 @@ func (t *smbTarget) Put(ctx context.Context, name string, r io.Reader, _ int64) 
 			return err
 		}
 	}
-	tmp := final + ".part"
-	f, err := share.Create(tmp)
+	if _, err := share.Stat(final); err == nil {
+		return ErrObjectExists
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	tmp, err := stagingName(final)
+	if err != nil {
+		return err
+	}
+	f, err := share.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return err
 	}
@@ -118,14 +126,11 @@ func (t *smbTarget) Put(ctx context.Context, name string, r io.Reader, _ int64) 
 		_ = share.Remove(tmp)
 		return err
 	}
-	// SMB rename does not replace an existing file. This leaves a small gap
-	// between remove and rename; the protocol library offers no atomic replace.
-	if err := share.Remove(final); err != nil && !os.IsNotExist(err) {
-		_ = share.Remove(tmp)
-		return err
-	}
 	if err := share.Rename(tmp, final); err != nil {
 		_ = share.Remove(tmp)
+		if os.IsExist(err) {
+			return ErrObjectExists
+		}
 		return err
 	}
 	return nil

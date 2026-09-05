@@ -2,10 +2,9 @@ package offsite
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 )
 
@@ -19,20 +18,28 @@ func (t *localTarget) Put(ctx context.Context, name string, r io.Reader, _ int64
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	final := filepath.Join(t.dir, filepath.FromSlash(name))
-	if err := os.MkdirAll(filepath.Dir(final), 0700); err != nil {
+	if err := os.MkdirAll(t.dir, 0700); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(filepath.Dir(final), ".ky-offsite-*.part")
+	root, err := os.OpenRoot(t.dir)
 	if err != nil {
 		return err
 	}
-	tmp := f.Name()
-	defer os.Remove(tmp)
-	if err := f.Chmod(0600); err != nil {
-		f.Close()
+	defer root.Close()
+	if parent := path.Dir(name); parent != "." {
+		if err := root.MkdirAll(parent, 0700); err != nil {
+			return err
+		}
+	}
+	tmp, err := stagingName(name)
+	if err != nil {
 		return err
 	}
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	defer root.Remove(tmp)
 	if _, err := io.Copy(f, &contextReader{ctx: ctx, r: r}); err != nil {
 		f.Close()
 		return err
@@ -44,10 +51,7 @@ func (t *localTarget) Put(ctx context.Context, name string, r io.Reader, _ int64
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, final); err != nil {
-		return fmt.Errorf("offsite: replace local object: %w", err)
-	}
-	return nil
+	return root.Rename(tmp, name)
 }
 
 func (t *localTarget) Get(ctx context.Context, name string) (io.ReadCloser, error) {
@@ -58,14 +62,24 @@ func (t *localTarget) Get(ctx context.Context, name string) (io.ReadCloser, erro
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return os.Open(filepath.Join(t.dir, filepath.FromSlash(name)))
+	root, err := os.OpenRoot(t.dir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return root.Open(name)
 }
 
 func (t *localTarget) Test(ctx context.Context) error {
 	if err := t.Put(ctx, pingName, strings.NewReader("ping"), 4); err != nil {
 		return err
 	}
-	return os.Remove(filepath.Join(t.dir, pingName))
+	root, err := os.OpenRoot(t.dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return root.Remove(pingName)
 }
 
 type contextReader struct {

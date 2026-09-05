@@ -8,4 +8,8 @@
 // while observing the NTLMv2 exchange. Use SMB only on a trusted network and
 // verify the share independently; a host-mounted share used through file://
 // avoids this library limitation.
+//
+// SMB Put refuses to replace an existing object and returns ErrObjectExists:
+// go-smb2 does not expose an atomic replace-on-rename operation, and deleting
+// the previous object before rename could lose the last good replica.
 package offsite

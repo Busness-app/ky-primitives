@@ -2,6 +2,8 @@ package offsite
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -15,7 +17,11 @@ import (
 const (
 	defaultTransferBudget = 5 * time.Minute
 	pingName              = ".ky-offsite-ping"
+	stagingPrefix         = ".ky-offsite-tmp-"
 )
+
+// ErrObjectExists is returned when a backend cannot safely replace an object.
+var ErrObjectExists = errors.New("offsite: object already exists")
 
 // Target is an offsite object store. Get returns an error matching
 // os.ErrNotExist when name is absent.
@@ -148,11 +154,19 @@ func cleanName(name string) (string, error) {
 		return "", errors.New("offsite: object name must be a relative slash-separated path")
 	}
 	for _, part := range strings.Split(name, "/") {
-		if part == "" || part == "." || part == ".." {
+		if part == "" || part == "." || part == ".." || strings.HasPrefix(part, stagingPrefix) {
 			return "", errors.New("offsite: object name contains an unsafe path component")
 		}
 	}
 	return name, nil
+}
+
+func stagingName(final string) (string, error) {
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return "", fmt.Errorf("offsite: create staging name: %w", err)
+	}
+	return path.Join(path.Dir(final), stagingPrefix+hex.EncodeToString(random[:])), nil
 }
 
 func cleanPrefix(p string) (string, error) {

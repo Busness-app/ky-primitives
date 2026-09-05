@@ -32,6 +32,14 @@ Object names are relative slash-separated paths. Absolute paths, backslashes,
 empty components, `.` and `..` are rejected for every target. `Get` returns an
 error matching `os.ErrNotExist` only when the object is absent. Callers must
 close a successful `Get`; for network targets that also closes the session.
+Local targets resolve every operation through `os.Root`, so a symlink beneath
+the configured directory cannot escape it. SFTP and SMB reserve random
+`.ky-offsite-tmp-*` names for staging; callers cannot address that namespace.
+
+SMB cannot safely replace an existing path because `go-smb2` does not expose
+replace-on-rename. Its `Put` returns `ErrObjectExists` instead of deleting the
+previous replica. Use immutable object names, as capsule and content-addressed
+blob IDs do.
 
 `Test` writes `.ky-offsite-ping`. Local, SFTP, and SMB remove it; S3 overwrites
 the same probe object on later tests.

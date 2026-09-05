@@ -95,11 +95,15 @@ func (t *sftpTarget) Put(ctx context.Context, name string, r io.Reader, _ int64)
 			return err
 		}
 	}
-	final, tmp := path.Join(t.dir, name), path.Join(t.dir, name)+".part"
+	final := path.Join(t.dir, name)
+	tmp, err := stagingName(final)
+	if err != nil {
+		return err
+	}
 	if err := client.MkdirAll(path.Dir(final)); err != nil {
 		return err
 	}
-	f, err := client.Create(tmp)
+	f, err := client.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
 	if err != nil {
 		return err
 	}

@@ -65,9 +65,12 @@ func TestSMBLiveContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := "contract-object"
+	name := "contract-object-" + time.Now().UTC().Format("20060102T150405.000000000")
 	if err := target.Put(context.Background(), name, strings.NewReader("payload"), 7); err != nil {
 		t.Fatal(err)
+	}
+	if err := target.Put(context.Background(), name, strings.NewReader("replacement"), 11); !errors.Is(err, ErrObjectExists) {
+		t.Fatalf("SMB overwrite error = %v", err)
 	}
 	r, err := target.Get(context.Background(), name)
 	if err != nil {

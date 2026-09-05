@@ -130,9 +130,33 @@ func TestLocalTargetContract(t *testing.T) {
 
 func TestTargetsRejectUnsafeNames(t *testing.T) {
 	target := &localTarget{dir: t.TempDir()}
-	for _, name := range []string{"", "/absolute", "../escape", "a/../b", "a//b", `a\b`, "."} {
+	for _, name := range []string{"", "/absolute", "../escape", "a/../b", "a//b", `a\b`, ".", stagingPrefix + "reserved"} {
 		if err := target.Put(context.Background(), name, strings.NewReader("x"), 1); err == nil {
 			t.Errorf("Put accepted %q", name)
 		}
+	}
+}
+
+func TestLocalTargetRefusesSymlinkEscapes(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	secret := filepath.Join(outside, "secret")
+	if err := os.WriteFile(secret, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(root, "leak")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	target := &localTarget{dir: root}
+	if _, err := target.Get(context.Background(), "leak"); err == nil {
+		t.Fatal("Get followed a symlink outside the configured root")
+	}
+	if err := target.Put(context.Background(), "escape/written", strings.NewReader("owned"), 5); err == nil {
+		t.Fatal("Put followed a directory symlink outside the configured root")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "written")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outside file exists: %v", err)
 	}
 }

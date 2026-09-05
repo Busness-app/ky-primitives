@@ -136,6 +136,27 @@ func TestSFTPTargetContractAndHostPin(t *testing.T) {
 	}
 }
 
+func TestSFTPStagingDoesNotMutatePartObject(t *testing.T) {
+	addr, fingerprint := startSFTPServer(t)
+	target := &sftpTarget{addr: addr, user: testSFTPUser, secret: testSFTPPass, dir: filepath.Join(t.TempDir(), "vault"), hostKey: fingerprint, timeout: 3 * time.Second}
+	ctx := context.Background()
+	if err := target.Put(ctx, "victim.part", strings.NewReader("important"), 9); err != nil {
+		t.Fatal(err)
+	}
+	if err := target.Put(ctx, "victim", strings.NewReader("replacement"), 11); err != nil {
+		t.Fatal(err)
+	}
+	r, err := target.Get(ctx, "victim.part")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(r)
+	_ = r.Close()
+	if err != nil || string(raw) != "important" {
+		t.Fatalf("victim.part = %q, %v", raw, err)
+	}
+}
+
 func TestSFTPNeverOffersPEMAsPassword(t *testing.T) {
 	addr, fingerprint := startSFTPServer(t)
 	_, private, _ := ed25519.GenerateKey(rand.Reader)
