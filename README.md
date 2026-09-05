@@ -689,6 +689,12 @@ What it pins, each by a named test:
 - URLs are HTTPS without credentials, query or fragment; private and carrier-grade NAT
   destinations need `Options.AllowPrivate`; loopback, link-local, multicast, unspecified and
   reserved never pass (`TestValidateURL*`). Redirects are refused (`TestClientRefusesRedirect`).
+  `errors.Is(err, recoveryclient.ErrPrivateDestination)` identifies literal-IP and
+  DNS-time refusals where enabling `AllowPrivate` would admit an address, including
+  errors returned by `ClaimPairing` and `Deposit`. Products use this to name their own
+  environment setting and container recreation instructions. It does not match addresses
+  that remain forbidden, lookup failures, or connection/TLS/server errors.
+
 - A receipt must describe the bytes sent, and one naming another capsule is `ErrRemote` and
   unrecorded (`TestDepositRefusesReceiptThatDoesNotDescribeBytesSent`,
   `TestRunReceiptForOtherCapsuleIsRemoteAndUnrecorded`).
