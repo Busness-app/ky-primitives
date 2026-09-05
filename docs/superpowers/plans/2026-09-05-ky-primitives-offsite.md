@@ -48,7 +48,7 @@ func ParseSMBEndpoint(endpoint, share, dir string) (addr, outShare, outDir strin
 
 URL forms:
 
-- `s3://bucket/prefix`: `AccessKey` and `Secret` are required together; `S3Region` defaults to `us-east-1`; blank `S3Endpoint` selects AWS virtual-hosted style, while an explicit HTTP(S) endpoint supports R2 and MinIO.
+- `s3://bucket/prefix`: `AccessKey` and `Secret` are required together; `S3Region` defaults to `us-east-1`; blank `S3Endpoint` selects AWS virtual-hosted style. Explicit endpoints must use HTTPS, including MinIO; HTTP endpoints are rejected.
 - `sftp://user@host:22/dir`: username-only userinfo is allowed; a URL password is rejected. `AccessKey` supplies the user when the URL omits it. `HostKey` is always required to connect, with `UnknownHostKeyError` carrying the presented fingerprint during `Test`.
 - `smb://host/share/dir`: credentials stay in `AccessKey` and `Secret`; all userinfo is rejected. `AccessKey` may be `DOMAIN\\user`.
 - `file:///absolute/path`: credentials and a non-empty URL host are rejected.
@@ -69,7 +69,7 @@ Steps:
 - [ ] Add module path `github.com/Busness-app/ky-primitives/offsite` with the same Go directive as the root module. Start with the exact SFTP, SMB, and `x/crypto` versions used by KyRecovery at implementation time; do not add them to the root `go.mod`.
 - [ ] Change the root filesystem walk to skip a directory, other than `.`, when that directory contains its own `go.mod`. Add a fixture/helper-level test that proves nested-module Go files are excluded while ordinary new root packages remain covered.
 - [ ] Add an offsite dependency-budget test that permits only `go-smb2`, `pkg/sftp`, `x/crypto`, and their transitive requirements. Reject `replace` directives so a local checkout cannot silently define the release.
-- [ ] Document the package boundary and the SMB guest-session limitation from KyRecovery's README: signing is required, SMB1 is unavailable, but `go-smb2` can accept an unsigned guest session from an impersonating server.
+- [ ] Document the package boundary and the absolute no-guest invariant. Although the current client verifies the final SESSION_SETUP response before adopting its flags, prefer a patched dependency that also rejects a signed final guest/null flag when signing is required.
 - [ ] Verify from the repository root and nested module: `go test ./...`; `(cd offsite && go test ./...)`.
 
 ## Task 2: Define parsing, identity, and path safety
@@ -112,7 +112,8 @@ Steps:
 
 Steps:
 
-- [ ] First add hermetic HTTP-server tests for AWS virtual-hosted URLs and explicit path-style endpoints, seekable and streaming PUT bodies, prefix escaping, bounded error bodies, cancellation, and accepted success statuses.
+- [ ] First add hermetic TLS-server tests for AWS virtual-hosted URLs and explicit path-style endpoints, seekable and streaming PUT bodies, prefix escaping, bounded error bodies, cancellation, accepted success statuses, HTTPS-only endpoint validation, and redirect refusal. Use an unexported transport seam to trust the test certificate; production never accepts HTTP.
+- [ ] Install `CheckRedirect` that refuses every redirect and prove 307/308 responses are not followed, so signed request bodies and credentials never move to a server the operator did not configure.
 - [ ] Make signing time and HTTP transport injectable only through unexported test seams. Add deterministic golden assertions for PUT and GET canonical requests/authorization rather than checking only that a header exists.
 - [ ] Lift PUT without reading seekable inputs into memory. Treat a negative size as invalid; for a non-seekable reader, buffer once and derive the actual size and hash.
 - [ ] Add signed GET with `x-amz-content-sha256: UNSIGNED-PAYLOAD`. Return the response body directly on success, map 404 (including `NoSuchKey`) to `os.ErrNotExist`, and close all non-success bodies.
@@ -148,6 +149,7 @@ Steps:
 
 - [ ] Port table tests for bare host, custom port, UNC, slash, and `smb://` forms. Reject all userinfo before path splitting so passwords containing slashes or backslashes cannot leak through parsing or errors.
 - [ ] Preserve SMB 2/3-only behavior and `RequireMessageSigning: true`, domain parsing, whole-operation timeout, `.part` upload, and replace-via-remove-then-rename semantics.
+- [ ] Pin a patched dependency (or a released version containing the hardening) that checks final successful SESSION_SETUP flags and rejects guest/null sessions when signing is required. Add an authenticated server regression returning a signed guest final response; `Test` and `Put` must fail before mounting a share. This is an absolute transport invariant, not a claim that an unauthenticated peer can forge the verified response.
 - [ ] Make an existing-destination replacement failure explicit: if removal succeeds but rename fails, return the error and remove the partial file; document that SMB cannot provide the same atomic replacement guarantee as local/SFTP.
 - [ ] Implement GET with `share.Open` and a closer that unmounts, logs off, closes the connection, and cancels the budget exactly once. Map only an SMB not-found status to `os.ErrNotExist`.
 - [ ] Keep hermetic parsing and stalled-server tests in ordinary CI. Port the live round-trip, bad-password, replacement, and missing-file cases behind `KY_OFFSITE_SMB_TEST="host:port/share|user|password"`; do not describe skipped tests as CI proof.
@@ -180,7 +182,7 @@ Steps:
 
 - [ ] Add a Linux/macOS and pinned/stable Go matrix for `(cd offsite && go build ./... && go vet ./... && go test -race -count=1 ./...)`.
 - [ ] Add a formatting check for the nested module and run `govulncheck` with `working-directory: offsite`. Keep the root checks unchanged and green.
-- [ ] Document URL forms, credential placement, host-key enrollment, timeout behavior, missing-object semantics, the SMB guest-session limitation, and the separate module tag namespace.
+- [ ] Document URL forms, credential placement, host-key enrollment, timeout behavior, missing-object semantics, enforced SMB signed-session behavior, and the separate module tag namespace.
 - [ ] Document release commands and consumer syntax: create repository tag `offsite/v0.1.0`; consumers require module `github.com/Busness-app/ky-primitives/offsite` with `go get github.com/Busness-app/ky-primitives/offsite@v0.1.0`.
 - [ ] Run root and nested-module build, vet, race tests, formatting checks, and vulnerability checks locally before opening the PR.
 
@@ -212,7 +214,7 @@ Steps:
 - [ ] Root dependency tests still discover ordinary new packages and intentionally skip `offsite/` as a nested module.
 - [ ] Nested build, vet, race tests, formatting, and vulnerability scan pass.
 - [ ] SFTP cannot connect without a verified host pin and never sends PEM material as a password.
-- [ ] SMB requires signing, never negotiates SMB1, and prominently documents the guest-session gap.
+- [ ] SMB requires signing, never negotiates SMB1, and rejects guest/null flags on both intermediate and final SESSION_SETUP responses; the malicious final-response downgrade test passes.
 - [ ] Every target rejects unsafe names and maps only a genuinely absent object to `os.ErrNotExist`.
 - [ ] `Key` is stable and credential-free.
 - [ ] KyRecovery's stored targets migrate without database changes and complete a real sync.
