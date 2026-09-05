@@ -668,10 +668,12 @@ What it pins, each by a named test:
   (`TestRunNeedsAKeyThenADestination`, `TestRunPairedDeliversToBothAndRecordsReceipt`).
 - A failed local copy never cancels the deposit; it rides in `Result.LocalError`
   (`TestRunLocalFailureDoesNotCancelTheDeposit`).
-- Local copies are `<AppName>.<capsule-id>.kycap` at 0600 (the app name reduced to
-  `[A-Za-z0-9_-]`, so no name can be another's prefix plus the delimiter), written by temp file and rename,
+- Local copies are `<AppName>.<capsule-id>.kycap` at 0600 (the app name escaped reversibly
+  into `[A-Za-z0-9-_]`, so distinct names never share a prefix and no name can be another's
+  prefix plus the delimiter), written by temp file and rename,
   and only that prefix is listed or pruned (`TestWriteLocalCopyPrunesOwnPrefixOnly`,
-  `TestLocalCopiesOfAPrefixedAppNameAreInvisibleToTheShorterName`). A
+  `TestLocalCopiesOfAPrefixedAppNameAreInvisibleToTheShorterName`,
+  `TestLocalCopiesOfCollidingNamesStaySeparate`). A
   retention count below one is refused before anything is written, so a zero value can never
   mean "delete everything" (`TestWriteLocalCopyRetention`).
 - The schedule is bounded in whole seconds before any `Duration` math, on the way in and on

@@ -122,3 +122,32 @@ func TestLocalCopiesOfAPrefixedAppNameAreInvisibleToTheShorterName(t *testing.T)
 		t.Fatalf("app sees %d after evil.app wrote", len(mine))
 	}
 }
+
+// Names that differ only in a character outside the safe set must not share a prefix, and a
+// name made only of such characters must not collide with a literal one.
+func TestLocalCopiesOfCollidingNamesStaySeparate(t *testing.T) {
+	dir := t.TempDir()
+	pairs := [][2]string{{"a.b", "a-b"}, {"a_b", "a-b"}, {"...", "_"}, {"x_2e", "x."}, {"", "_"}}
+	for _, p := range pairs {
+		if appNameSafe(p[0]) == appNameSafe(p[1]) {
+			t.Errorf("%q and %q collide as %q", p[0], p[1], appNameSafe(p[0]))
+		}
+	}
+	names := []string{"a.b", "a-b", "a_b", "...", "app", "_"}
+	for _, n := range names {
+		for i := 0; i < 3; i++ {
+			if _, err := WriteLocalCopy(dir, n, "cap-"+strings.Repeat("x", i+1), []byte("sealed"), 10); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, n := range names {
+		copies, err := ListLocalCopies(dir, n)
+		if err != nil || len(copies) != 3 {
+			t.Errorf("%q sees %d copies: %v", n, len(copies), err)
+		}
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 3*len(names) {
+		t.Fatalf("%d files; a neighbour's capsule was pruned", len(entries))
+	}
+}

@@ -46,25 +46,32 @@ type LocalCopy struct {
 
 // localPrefix scopes this instance's files in the backup directory: only names carrying it
 // are listed or pruned, so capsules the operator put there by hand, or another service's,
-// are never touched. The app name is reduced to [A-Za-z0-9_-] and joined with ".", a
-// character that mapping can never produce, so no app name is a prefix of another's plus
-// the delimiter: "app" cannot see "app-staging"'s files. Files are <app>.<capsule-id>.kycap.
+// are never touched. The app name is escaped reversibly into [A-Za-z0-9-_] and joined with
+// ".", a character the escaping can never produce, so two properties hold: no app name is a
+// prefix of another's plus the delimiter ("app" cannot see "app-staging"), and two distinct
+// names never share a prefix ("a.b" and "a-b" escape differently). Files are
+// <escaped-app>.<capsule-id>.kycap.
 func localPrefix(appName string) string {
 	return appNameSafe(appName) + "."
 }
 
+// appNameSafe escapes every byte outside [A-Za-z0-9-] as _XX (two hex digits), including a
+// literal underscore, so the mapping is injective and its output never contains ".".
 func appNameSafe(s string) string {
-	out := strings.Map(func(r rune) rune {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
 		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
-			return r
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-':
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, "_%02x", c)
 		}
-		return '-'
-	}, s)
-	if out == "" {
-		return "app"
 	}
-	return out
+	if b.Len() == 0 {
+		return "_"
+	}
+	return b.String()
 }
 
 // WriteLocalCopy stores a sealed capsule as <app>.<capsule-id>.kycap in dir and prunes this
