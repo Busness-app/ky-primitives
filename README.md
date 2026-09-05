@@ -773,6 +773,50 @@ the lock so concurrent verifications share it, and a stale key set outlives an i
 (`TestJWKSRefreshIsRateLimitedAndStaleSetSurvivesOutage`, `TestUnknownKidDoesNotStallVerification`,
 `TestConcurrentUnknownKidsShareOneFetch`).
 
+## scim
+
+The SCIM 2.0 client KySignOn provisions accounts with, and the RFC 7643 User type it shares
+with a server. Before this the types, paths and status handling sat in KySignOn's sync engine,
+where a 409 on create counted as a delivered account, later calls used local IDs the server
+never issued, and generic targets got the suite signature instead of their bearer token. An
+account that does not exist recorded as provisioned is the bar.
+
+```go
+c := &scim.Client{BaseURL: sys.URL, Token: sys.Token, HTTPClient: netguard.Client(5 * time.Second)}
+created, err := c.CreateUser(ctx, user)          // keep created.ID; it is the handle from here on
+if errors.Is(err, scim.ErrConflict) {
+	created, err = c.FindUser(ctx, "externalId", user.ExternalID)
+}
+_, err = c.PatchUser(ctx, created.ID, scim.PatchOperation{Op: "replace", Path: "active", Value: false})
+err = c.DeleteUser(ctx, created.ID)              // errors.Is(err, scim.ErrNotFound): already gone
+```
+
+Users only; groups, listing and bulk wait for a caller. `FindUser` takes `externalId` or
+`userName`, the two attributes whose match it can check on the way back. `HTTPClient` is the
+product's, so its outbound policy applies; the client adds what every product must not get
+wrong.
+
+Pinned: the base URL is HTTPS with a host and nothing else, and an empty token is refused,
+before any request (`TestPlaintextOrMalformedBaseURLIsRefusedWithoutARequest`); a redirect is
+refused and the bearer does not follow it (`TestRedirectIsRefusedAndTokenNotReplayed`);
+resource IDs are path-escaped and an empty or dot ID never reaches the wire
+(`TestResourceIDsAreEscapedAndRequired`); the filter value is quoted with `\` and `"` escaped
+and any other attribute is refused (`TestFilterIsEscapedAndAttributeRestricted`); zero matches
+is `ErrNotFound`, two is `ErrAmbiguous`, and one that does not carry the value is
+`ErrMalformedResponse`, so a server that ignores the filter cannot hand back someone else
+(`TestFindUserZeroAndManyResults`, `TestFindUserRefusesAUserThatDoesNotMatch`); 409 is
+`ErrConflict` and a 2xx create without an `id` is `ErrMalformedResponse`
+(`TestCreateConflictIsAnErrorNotSuccess`, `TestCreateWithoutAnIDIsAnError`); only 200, 201 and
+204 are success, so a 3xx without `Location` or a 202 is not a completed delete, and `Ping`
+needs a JSON object (`TestUnexpectedStatusesAreNotSuccess`); bodies are read to 1 MiB, error
+detail is printable and short with the bearer token redacted out of it, and `Retry-After` is
+surfaced capped at an hour and never negative (`TestOversizedSuccessBodyIsRefused`,
+`TestErrorBodyIsBoundedAndPrintable`, `TestTokenIsRedactedFromErrorDetail`,
+`TestRetryAfterIsBoundedAndNonNegative`); a transport error names the path, not the query
+that carries a user identifier (`TestTransportErrorsDoNotCarryTheQuery`); the round trip
+against a server that mints unrelated IDs uses those IDs throughout
+(`TestLifecycleAgainstServerMintedIDs`).
+
 ## offsite nested module
 
 One client for copying opaque data to S3-compatible storage, pinned SFTP,
