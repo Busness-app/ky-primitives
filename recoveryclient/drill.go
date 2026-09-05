@@ -111,13 +111,20 @@ func Drill(ctx context.Context, scratchRoot string, payload Payload, checks func
 	return finish()
 }
 
+// staleDrill is how old a drill directory must be before the sweep treats it as residue of
+// a killed run rather than a drill still in flight beside this one.
+const staleDrill = time.Hour
+
 func sweepStaleDrills(root string) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		return
 	}
 	for _, e := range entries {
-		if e.IsDir() && strings.HasPrefix(e.Name(), drillPrefix) {
+		if !e.IsDir() || !strings.HasPrefix(e.Name(), drillPrefix) {
+			continue
+		}
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > staleDrill {
 			_ = os.RemoveAll(filepath.Join(root, e.Name()))
 		}
 	}

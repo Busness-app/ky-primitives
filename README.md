@@ -744,7 +744,9 @@ claims, err := v.VerifyWithNonce(ctx, idToken, session.Nonce)
 mux.Handle("GET /api/me", v.Middleware(logReject)(handler))
 ```
 
-Pinned: the algorithm is RS256 or nothing, so `none`, `HS256` and an empty signature segment
+Pinned: the issuer and JWKS URL must be HTTPS and the fetch follows no redirect, checked
+before any request is made (`TestPlaintextIssuerIsRefusedWithoutARequest`,
+`TestJWKSRedirectIsRefused`); the algorithm is RS256 or nothing, so `none`, `HS256` and an empty signature segment
 are refused before any key work (`TestVerifyRefusesAlgorithmConfusionAndBadSignatures`);
 each standard claim is checked with one minute of leeway and an audience array is refused
 unless the product opts in (`TestVerifyRefusesEachBadClaim`); base64url must be unpadded so

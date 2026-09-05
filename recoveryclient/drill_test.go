@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDrillOpensWhatItSealedAndWipesScratch(t *testing.T) {
@@ -45,6 +46,12 @@ func TestDrillUsesTheCallerScratchRoot(t *testing.T) {
 	if err := os.MkdirAll(stale, 0700); err != nil {
 		t.Fatal(err)
 	}
+	old := time.Now().Add(-2 * time.Hour)
+	_ = os.Chtimes(stale, old, old)
+	live := filepath.Join(root, drillPrefix+"live")
+	if err := os.MkdirAll(live, 0700); err != nil {
+		t.Fatal(err)
+	}
 	var seen string
 	res, err := Drill(context.Background(), root, testPayload(), func(dir string) []Check {
 		seen = dir
@@ -58,6 +65,9 @@ func TestDrillUsesTheCallerScratchRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Error("stale drill directory survived")
+	}
+	if _, err := os.Stat(live); err != nil {
+		t.Error("a drill still in flight beside this one was removed")
 	}
 	if _, err := Drill(context.Background(), "", testPayload(), nil); err != ErrNoScratchRoot {
 		t.Errorf("empty root: %v", err)

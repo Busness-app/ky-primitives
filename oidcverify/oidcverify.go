@@ -20,6 +20,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -123,6 +124,9 @@ func (v *Verifier) Verify(ctx context.Context, token string) (Claims, error) {
 // flow. An empty nonce skips the check; a token carrying a nonce when none is expected is
 // still accepted, since access tokens carry none.
 func (v *Verifier) VerifyWithNonce(ctx context.Context, token, nonce string) (Claims, error) {
+	if _, err := v.jwksURL(); err != nil {
+		return Claims{}, err
+	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return Claims{}, ErrMalformed
@@ -339,16 +343,48 @@ func (v *Verifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) 
 	return nil, ErrUnknownKey
 }
 
+// ErrInsecureIssuer means the issuer or JWKS URL is not HTTPS. Key discovery over plaintext
+// lets whoever answers the request decide which keys verify tokens.
+var ErrInsecureIssuer = errors.New("oidcverify: issuer and JWKS URL must be https with a host")
+
+func requireHTTPS(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return fmt.Errorf("%w: %q", ErrInsecureIssuer, raw)
+	}
+	return nil
+}
+
+// jwksURL is the effective JWKS endpoint, checked to be HTTPS along with the issuer.
+func (v *Verifier) jwksURL() (string, error) {
+	if err := requireHTTPS(v.Issuer); err != nil {
+		return "", err
+	}
+	u := v.JWKSURL
+	if u == "" {
+		u = strings.TrimRight(v.Issuer, "/") + "/.well-known/jwks.json"
+	}
+	if err := requireHTTPS(u); err != nil {
+		return "", err
+	}
+	return u, nil
+}
+
 func (v *Verifier) fetch(ctx context.Context) (map[string]*rsa.PublicKey, error) {
-	url := v.JWKSURL
-	if url == "" {
-		url = strings.TrimRight(v.Issuer, "/") + "/.well-known/jwks.json"
+	u, err := v.jwksURL()
+	if err != nil {
+		return nil, err
 	}
-	client := v.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+	base := v.HTTPClient
+	if base == nil {
+		base = &http.Client{Timeout: 10 * time.Second}
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	// Key discovery needs no redirect; following one would let a redirector choose the keys.
+	client := *base
+	client.CheckRedirect = func(req *http.Request, _ []*http.Request) error {
+		return fmt.Errorf("%w: JWKS endpoint redirected to %s", ErrJWKS, req.URL.Redacted())
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrJWKS, err)
 	}

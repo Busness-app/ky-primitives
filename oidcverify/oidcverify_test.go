@@ -38,7 +38,7 @@ func newIssuer(t *testing.T) *issuer {
 	is.jwks = func() any {
 		return map[string]any{"keys": []any{jwkFor(is.kid, &key.PublicKey)}}
 	}
-	is.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	is.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		is.fetches.Add(1)
 		if r.URL.Path != "/.well-known/jwks.json" {
 			http.NotFound(w, r)
@@ -279,13 +279,15 @@ func TestUnknownKidDoesNotStallVerification(t *testing.T) {
 	// and that one costs at most the client timeout.
 	release := make(chan struct{})
 	entered := atomic.Int32{}
-	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	hang := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		entered.Add(1)
 		<-release
 	}))
 	defer func() { close(release); hang.Close() }()
 	v.JWKSURL = hang.URL + "/.well-known/jwks.json"
-	v.HTTPClient = &http.Client{Timeout: 200 * time.Millisecond}
+	hc := hang.Client()
+	hc.Timeout = 200 * time.Millisecond
+	v.HTTPClient = hc
 	v.MinRefresh = time.Hour
 	// Only the cached set is fresh for known kids; force a stale set so a known kid would
 	// also want a refresh, then check it is served from the stale set without waiting.
@@ -322,5 +324,37 @@ func TestConcurrentUnknownKidsShareOneFetch(t *testing.T) {
 	wg.Wait()
 	if n := is.fetches.Load(); n != 1 {
 		t.Fatalf("%d fetches for one cold start", n)
+	}
+}
+
+func TestPlaintextIssuerIsRefusedWithoutARequest(t *testing.T) {
+	var hits atomic.Int32
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits.Add(1) }))
+	defer plain.Close()
+	is := newIssuer(t)
+	tok := is.mint(nil, good(is), nil)
+	for _, v := range []*Verifier{
+		{Issuer: plain.URL, Audience: "kynotes", HTTPClient: plain.Client()},
+		{Issuer: is.srv.URL, JWKSURL: plain.URL + "/.well-known/jwks.json", Audience: "kynotes", HTTPClient: plain.Client()},
+		{Issuer: "https://user:pw@issuer.example", Audience: "kynotes"},
+	} {
+		if _, err := v.Verify(context.Background(), tok); !errors.Is(err, ErrInsecureIssuer) {
+			t.Errorf("%s / %s: %v", v.Issuer, v.JWKSURL, err)
+		}
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("plaintext endpoint was contacted %d times", hits.Load())
+	}
+}
+
+func TestJWKSRedirectIsRefused(t *testing.T) {
+	is := newIssuer(t)
+	redirector := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, is.srv.URL+"/.well-known/jwks.json", http.StatusFound)
+	}))
+	defer redirector.Close()
+	v := &Verifier{Issuer: is.srv.URL, JWKSURL: redirector.URL + "/jwks", Audience: "kynotes", HTTPClient: redirector.Client()}
+	if _, err := v.Verify(context.Background(), is.mint(nil, good(is), nil)); !errors.Is(err, ErrJWKS) {
+		t.Fatalf("%v", err)
 	}
 }
