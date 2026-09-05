@@ -29,7 +29,7 @@ func TestWriteLocalCopyPrunesOwnPrefixOnly(t *testing.T) {
 		t.Fatalf("%+v %v", copies, err)
 	}
 	for _, c := range copies {
-		if !strings.HasPrefix(c.Name, "Svc-") {
+		if !strings.HasPrefix(c.Name, "Svc.") {
 			t.Errorf("listed %s", c.Name)
 		}
 	}
@@ -91,5 +91,34 @@ func TestWriteLocalCopySweepsStaleTempFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(fresh); err != nil {
 		t.Error("a temp file still being written was removed")
+	}
+}
+
+// One app name being a prefix of another must not let the shorter one see, or prune, the
+// longer one's capsules when they share a directory.
+func TestLocalCopiesOfAPrefixedAppNameAreInvisibleToTheShorterName(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 3; i++ {
+		if _, err := WriteLocalCopy(dir, "app-staging", "cap-"+strings.Repeat("s", i+1), []byte("sealed"), 5); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := WriteLocalCopy(dir, "app", "cap-p", []byte("sealed"), 1); err != nil {
+		t.Fatal(err)
+	}
+	mine, _ := ListLocalCopies(dir, "app")
+	theirs, _ := ListLocalCopies(dir, "app-staging")
+	if len(mine) != 1 || len(theirs) != 3 {
+		t.Fatalf("app sees %d, app-staging sees %d", len(mine), len(theirs))
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 4 {
+		t.Fatalf("%d files; a neighbour's capsule was pruned", len(entries))
+	}
+	// A name with characters outside the safe set still cannot forge the delimiter.
+	if _, err := WriteLocalCopy(dir, "evil.app", "cap-e", []byte("sealed"), 1); err != nil {
+		t.Fatal(err)
+	}
+	if mine, _ = ListLocalCopies(dir, "app"); len(mine) != 1 {
+		t.Fatalf("app sees %d after evil.app wrote", len(mine))
 	}
 }

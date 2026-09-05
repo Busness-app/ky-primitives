@@ -46,12 +46,28 @@ type LocalCopy struct {
 
 // localPrefix scopes this instance's files in the backup directory: only names carrying it
 // are listed or pruned, so capsules the operator put there by hand, or another service's,
-// are never touched.
+// are never touched. The app name is reduced to [A-Za-z0-9_-] and joined with ".", a
+// character that mapping can never produce, so no app name is a prefix of another's plus
+// the delimiter: "app" cannot see "app-staging"'s files. Files are <app>.<capsule-id>.kycap.
 func localPrefix(appName string) string {
-	return FilenameSafe(appName) + "-"
+	return appNameSafe(appName) + "."
 }
 
-// WriteLocalCopy stores a sealed capsule as <app>-<capsule-id>.kycap in dir and prunes this
+func appNameSafe(s string) string {
+	out := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_', r == '-':
+			return r
+		}
+		return '-'
+	}, s)
+	if out == "" {
+		return "app"
+	}
+	return out
+}
+
+// WriteLocalCopy stores a sealed capsule as <app>.<capsule-id>.kycap in dir and prunes this
 // instance's oldest beyond keep. The bytes are sealed to the suite key, so the directory
 // needs no more protection than any other file the operator keeps; 0600 anyway. The write
 // goes through a temp file and rename so a crash never leaves a truncated .kycap that looks
