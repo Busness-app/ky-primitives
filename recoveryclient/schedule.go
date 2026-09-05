@@ -37,13 +37,25 @@ func Interval(defaultInterval time.Duration, settings Settings) (time.Duration, 
 	if err != nil {
 		return 0, fmt.Errorf("%s: %w", settingInterval, err)
 	}
+	// The row may predate this package or have been edited by hand, so the read path applies
+	// the same bound as the write path: a wrapped value must not read as "off", and a negative
+	// one must not make every tick due.
+	if !validSeconds(sec) {
+		return 0, ErrBadInterval
+	}
 	return time.Duration(sec) * time.Second, nil
+}
+
+// validSeconds is the one predicate both directions use: 0 (off) or within
+// [MinInterval, MaxInterval], checked on whole seconds before any Duration math.
+func validSeconds(sec int64) bool {
+	return sec == 0 || (sec >= int64(MinInterval/time.Second) && sec <= int64(MaxInterval/time.Second))
 }
 
 // SetInterval stores the schedule in whole seconds. The bound is checked on the seconds
 // before any conversion, so no value wraps to zero and reads as "off".
 func SetInterval(settings Settings, sec int64) error {
-	if sec != 0 && (sec < int64(MinInterval/time.Second) || sec > int64(MaxInterval/time.Second)) {
+	if !validSeconds(sec) {
 		return ErrBadInterval
 	}
 	return settings.Set(settingInterval, strconv.FormatInt(sec, 10))

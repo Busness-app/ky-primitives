@@ -49,3 +49,20 @@ func TestNextRunCountsFromLastAttempt(t *testing.T) {
 		t.Fatalf("after attempt: %v", next)
 	}
 }
+
+// A row written before this package, or by hand, gets the same bound on the way in.
+func TestIntervalRefusesAStoredValueOutsideTheBound(t *testing.T) {
+	for _, raw := range []string{"36028797018963968", "-3600", "1", "31622401"} {
+		s := memSettings{settingInterval: raw}
+		if d, err := Interval(24*time.Hour, s); !errors.Is(err, ErrBadInterval) || d != 0 {
+			t.Errorf("%s: %v %v", raw, d, err)
+		}
+		next, on, err := NextRun(24*time.Hour, s)
+		if !errors.Is(err, ErrBadInterval) || on || !next.IsZero() {
+			t.Errorf("%s: NextRun %v %v %v", raw, next, on, err)
+		}
+	}
+	if d, err := Interval(24*time.Hour, memSettings{settingInterval: "0"}); err != nil || d != 0 {
+		t.Errorf("stored off: %v %v", d, err)
+	}
+}

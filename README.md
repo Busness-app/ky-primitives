@@ -674,8 +674,10 @@ What it pins, each by a named test:
   `TestLocalCopiesOfAPrefixedAppNameAreInvisibleToTheShorterName`). A
   retention count below one is refused before anything is written, so a zero value can never
   mean "delete everything" (`TestWriteLocalCopyRetention`).
-- The schedule is bounded in whole seconds before any `Duration` math, so 2^55 seconds
-  cannot wrap to zero and read as off (`TestSetIntervalBoundsSeconds`); the next run counts
+- The schedule is bounded in whole seconds before any `Duration` math, on the way in and on
+  the way out, so a stored 2^55 seconds cannot wrap to zero and read as off and a stored
+  negative cannot make every tick due (`TestSetIntervalBoundsSeconds`,
+  `TestIntervalRefusesAStoredValueOutsideTheBound`); the next run counts
   from the last attempt (`TestNextRunCountsFromLastAttempt`).
 - The key pin is write-once and the settings row decides, not the file
   (`TestStoreRecoveryKeyIsWriteOnce`, `TestLoadRecoveryKeyDetectsSwappedFile`).
