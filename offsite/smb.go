@@ -87,7 +87,7 @@ func (t *smbTarget) mount(ctx context.Context) (*smb2.Share, func(), error) {
 }
 
 func (t *smbTarget) Put(ctx context.Context, name string, r io.Reader, _ int64) error {
-	name, err := cleanName(name)
+	name, err := cleanSMBName(name)
 	if err != nil {
 		return err
 	}
@@ -137,7 +137,7 @@ func (t *smbTarget) Put(ctx context.Context, name string, r io.Reader, _ int64) 
 }
 
 func (t *smbTarget) Get(ctx context.Context, name string) (io.ReadCloser, error) {
-	name, err := cleanName(name)
+	name, err := cleanSMBName(name)
 	if err != nil {
 		return nil, err
 	}
@@ -157,6 +157,33 @@ func (t *smbTarget) Get(ctx context.Context, name string) (io.ReadCloser, error)
 		return nil, err
 	}
 	return &sessionReadCloser{ReadCloser: f, cleanup: cleanup, cancel: cancel}, nil
+}
+
+// SMB servers commonly apply Windows case folding, alternate-data-stream,
+// trailing-dot, device-name, and short-name rules. A small canonical grammar
+// keeps distinct admitted names distinct on those servers.
+func cleanSMBName(name string) (string, error) {
+	name, err := cleanName(name)
+	if err != nil {
+		return "", err
+	}
+	for _, component := range strings.Split(name, "/") {
+		if component[len(component)-1] == '.' {
+			return "", errors.New("offsite: SMB object names must use lowercase ASCII letters, digits, dot, underscore, or hyphen")
+		}
+		for i := 0; i < len(component); i++ {
+			c := component[i]
+			if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') {
+				return "", errors.New("offsite: SMB object names must use lowercase ASCII letters, digits, dot, underscore, or hyphen")
+			}
+		}
+		stem, _, _ := strings.Cut(component, ".")
+		if stem == "con" || stem == "prn" || stem == "aux" || stem == "nul" ||
+			(len(stem) == 4 && (strings.HasPrefix(stem, "com") || strings.HasPrefix(stem, "lpt")) && stem[3] >= '1' && stem[3] <= '9') {
+			return "", errors.New("offsite: SMB object name uses a reserved Windows device name")
+		}
+	}
+	return name, nil
 }
 
 func (t *smbTarget) Test(ctx context.Context) error {

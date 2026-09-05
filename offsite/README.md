@@ -41,6 +41,12 @@ replace-on-rename. Its `Put` returns `ErrObjectExists` instead of deleting the
 previous replica. Use immutable object names, as capsule and content-addressed
 blob IDs do.
 
+SMB object-name components are limited to lowercase ASCII letters, digits,
+dot, underscore, and hyphen. Trailing dots, Windows device names, and `~` are
+also rejected. This canonical grammar prevents case folding, NTFS alternate
+streams, trailing-dot/space handling, and short-name rules from making two
+admitted logical names address the same SMB object.
+
 `Test` writes `.ky-offsite-ping`. Local, SFTP, and SMB remove it; S3 overwrites
 the same probe object on later tests.
 

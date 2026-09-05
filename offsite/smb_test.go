@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -45,6 +46,29 @@ func TestSMBStallHonorsBudget(t *testing.T) {
 	}
 }
 
+func TestSMBNamesCannotAlias(t *testing.T) {
+	for _, name := range []string{
+		"tenant/secret::$DATA",
+		"tenant/Secret",
+		"tenant/secret.",
+		"tenant/secret ",
+		"tenant/con",
+		"tenant/con.txt",
+		"tenant/com1.log",
+		"tenant/café",
+		"tenant/progra~1",
+	} {
+		if _, err := cleanSMBName(name); err == nil {
+			t.Errorf("accepted alias-prone SMB name %q", name)
+		}
+	}
+	for _, name := range []string{"tenant/secret", "capsules/a1b2-c3.kycap", pingName} {
+		if got, err := cleanSMBName(name); err != nil || got != name {
+			t.Errorf("cleanSMBName(%q) = %q, %v", name, got, err)
+		}
+	}
+}
+
 func TestSMBLiveContract(t *testing.T) {
 	spec := os.Getenv("KY_OFFSITE_SMB_TEST")
 	if spec == "" {
@@ -65,7 +89,7 @@ func TestSMBLiveContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := "contract-object-" + time.Now().UTC().Format("20060102T150405.000000000")
+	name := "contract-object-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	if err := target.Put(context.Background(), name, strings.NewReader("payload"), 7); err != nil {
 		t.Fatal(err)
 	}
