@@ -2,8 +2,11 @@
 
 Shared security primitives for the Busness.app suite.
 
-The dependency budget is **`golang.org/x/crypto` and the `golang.org/x/sys` it drags in,
-and nothing else.** Everything but `password` is standard-library-only. The rule was "no
+The `offsite/` directory is a separately versioned nested module. Its transport
+dependencies are not requirements of this root module.
+
+The root module's dependency budget is **`golang.org/x/crypto` and the `golang.org/x/sys` it drags in,
+and nothing else.** In that module, everything but `password` is standard-library-only. The rule was "no
 dependencies, ever" so that products with minimal trees could import this for free —
 `kypassword-server`'s `go.mod` named no third-party module at all, and now names exactly
 one: this library — and Argon2 is the one thing that broke it: the suite standardised on it for password hashing, and it is neither in the
@@ -760,6 +763,26 @@ most one rate-limited refresh whether the fetch succeeds or fails, the fetch run
 the lock so concurrent verifications share it, and a stale key set outlives an issuer outage
 (`TestJWKSRefreshIsRateLimitedAndStaleSetSurvivesOutage`, `TestUnknownKidDoesNotStallVerification`,
 `TestConcurrentUnknownKidsShareOneFetch`).
+
+## offsite nested module
+
+One client for copying opaque data to S3-compatible storage, pinned SFTP,
+signed SMB 2/3, or a local directory. It is a nested module so products that
+only use the root primitives do not inherit the SFTP and SMB dependency trees.
+
+```go
+target, err := offsite.Parse(offsite.Config{
+	URL: "sftp://backup@vault.example/copies",
+	Secret: privateKey,
+	HostKey: "SHA256:...",
+})
+err = target.Put(ctx, "attachments/object-id", body, size)
+```
+
+See [`offsite/README.md`](offsite/README.md) for URL forms and the security
+contract. Release tags are namespaced for the nested module: `offsite/v0.1.0`.
+Consumers install that release with
+`go get github.com/Busness-app/ky-primitives/offsite@v0.1.0`.
 
 ## Contributing
 
