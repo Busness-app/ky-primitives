@@ -68,6 +68,39 @@ func fine()    { _ = recoverykey.Generate }
 	}
 }
 
+func TestGuardSeesWebDirsPackageLevelInitialisersAndDotImports(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 11; i++ {
+		write(t, root, fmt.Sprintf("p%d/p.go", i), "package p\n")
+	}
+	write(t, root, "web/x.go", `package web
+
+import "github.com/Busness-app/ky-primitives/capsule"
+
+func serve() { _ = capsule.Open }
+`)
+	write(t, root, "cmd/y/main.go", `package main
+
+import "github.com/Busness-app/ky-primitives/recoverykey"
+
+var combine = recoverykey.Combine
+
+func restore() { _ = recoverykey.Combine }
+`)
+	write(t, root, "cmd/z/main.go", `package main
+
+import . "github.com/Busness-app/ky-primitives/capsule"
+
+func restore() { _ = Open }
+`)
+	rec := &recorder{}
+	run(rec, root, map[string][]string{filepath.Join("cmd", "y", "main.go"): {"restore"}, filepath.Join("cmd", "z", "main.go"): {"restore"}})
+	joined := strings.Join(rec.errors, "\n")
+	if rec.fatal != "" || len(rec.errors) != 3 || !strings.Contains(joined, "web/x.go") || !strings.Contains(joined, "at package level") || !strings.Contains(joined, "dot-imports") {
+		t.Fatalf("fatal=%q errors=%v", rec.fatal, rec.errors)
+	}
+}
+
 func TestGuardFailsOnRelativeRootOrTooFewFiles(t *testing.T) {
 	rec := &recorder{}
 	run(rec, "relative/path", nil)

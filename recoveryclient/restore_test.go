@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/Busness-app/ky-primitives/recoverykey"
 	"github.com/Busness-app/ky-primitives/shamir"
@@ -72,5 +73,27 @@ func TestReadSharesSkipsBlankLines(t *testing.T) {
 	shares, err := ReadShares(strings.NewReader("\n ky2-a \n\nky2-b\n"))
 	if err != nil || len(shares) != 2 || shares[0] != "ky2-a" {
 		t.Fatalf("%v %v", shares, err)
+	}
+}
+
+func TestRestorePrintsOnlyPrintableManifestFields(t *testing.T) {
+	priv, k := testKey(t)
+	shares, _ := recoverykey.Split(priv, 2, 3)
+	p := testPayload()
+	p.AppVersion = "1.0\x1b[2J\x07evil"
+	raw, _, err := Seal(p, k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "x.kycap")
+	_ = os.WriteFile(path, raw, 0600)
+	var out bytes.Buffer
+	if err := Restore(path, filepath.Join(t.TempDir(), "out"), "Svc", []string{shares[0].String(), shares[1].String()}, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range out.String() {
+		if r != '\n' && r != ' ' && !unicode.IsPrint(r) {
+			t.Fatalf("control rune %q reached the operator's terminal: %q", r, out.String())
+		}
 	}
 }

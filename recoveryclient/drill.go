@@ -2,8 +2,11 @@ package recoveryclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Busness-app/ky-primitives/capsule"
@@ -26,12 +29,26 @@ type DrillResult struct {
 	SizeBytes    int     `json:"size_bytes"`
 }
 
+// drillPrefix names scratch directories so a killed drill's residue is recognised and
+// removed by the next one.
+const drillPrefix = "recoveryclient-drill-"
+
+// ErrNoScratchRoot is returned when Drill is given no scratch root. The decrypted payload
+// must land under a directory the operator provisioned and protected, the product's data
+// directory, never under the system temp directory.
+var ErrNoScratchRoot = errors.New("recoveryclient: drill needs a scratch root inside the data directory")
+
 // Drill proves the payload restores: it seals to a throwaway key generated and discarded
-// inside this call, opens the capsule into a 0700 scratch directory wiped on return, and
-// appends the product's checks, which see only the scratch directory path. The suite key is
-// never involved, so a passing drill says the format restores, not that the custodians'
-// cards do; that is what the product's restore runbook is for.
-func Drill(ctx context.Context, payload Payload, checks func(dir string) []Check) (*DrillResult, error) {
+// inside this call, opens the capsule into a 0700 scratch directory under scratchRoot wiped
+// on return, and appends the product's checks, which see only the scratch directory path.
+// Stale scratch directories left under scratchRoot by a killed drill are removed first. The
+// suite key is never involved, so a passing drill says the format restores, not that the
+// custodians' cards do; that is what the product's restore runbook is for.
+func Drill(ctx context.Context, scratchRoot string, payload Payload, checks func(dir string) []Check) (*DrillResult, error) {
+	if scratchRoot == "" {
+		return nil, ErrNoScratchRoot
+	}
+	sweepStaleDrills(scratchRoot)
 	start := time.Now()
 	result := &DrillResult{}
 	fail := func(name, msg string) {
@@ -68,7 +85,7 @@ func Drill(ctx context.Context, payload Payload, checks func(dir string) []Check
 	result.SizeBytes = len(raw)
 	pass("Seal", fmt.Sprintf("%d files, %d bytes, capsule %s", len(payload.Files), len(raw), m.CapsuleID))
 
-	dir, err := os.MkdirTemp("", "recoveryclient-drill-*")
+	dir, err := os.MkdirTemp(scratchRoot, drillPrefix+"*")
 	if err != nil {
 		fail("Sandbox", AuditSafe(err.Error()))
 		return finish()
@@ -92,4 +109,16 @@ func Drill(ctx context.Context, payload Payload, checks func(dir string) []Check
 		result.Checks = append(result.Checks, checks(dir)...)
 	}
 	return finish()
+}
+
+func sweepStaleDrills(root string) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() && strings.HasPrefix(e.Name(), drillPrefix) {
+			_ = os.RemoveAll(filepath.Join(root, e.Name()))
+		}
+	}
 }

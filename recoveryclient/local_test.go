@@ -55,3 +55,41 @@ func TestListLocalCopiesMissingDirIsEmpty(t *testing.T) {
 		t.Fatalf("empty dir arg: %v %v", copies, err)
 	}
 }
+
+func TestWriteLocalCopyRetention(t *testing.T) {
+	dir := t.TempDir()
+	for _, keep := range []int{0, -1} {
+		if _, err := WriteLocalCopy(dir, "Svc", "cap-1", []byte("sealed"), keep); err != ErrBadKeep {
+			t.Errorf("keep %d: %v", keep, err)
+		}
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 0 {
+		t.Errorf("wrote with a bad keep: %d entries", len(entries))
+	}
+	p, err := WriteLocalCopy(dir, "Svc", "cap-1", []byte("sealed"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p); err != nil {
+		t.Error("keep=1 pruned the copy just written")
+	}
+}
+
+func TestWriteLocalCopySweepsStaleTempFiles(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, tempPrefix+"dead")
+	_ = os.WriteFile(stale, []byte("half"), 0600)
+	old := time.Now().Add(-2 * time.Hour)
+	_ = os.Chtimes(stale, old, old)
+	fresh := filepath.Join(dir, tempPrefix+"live")
+	_ = os.WriteFile(fresh, []byte("half"), 0600)
+	if _, err := WriteLocalCopy(dir, "Svc", "cap-1", []byte("sealed"), 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Error("stale temp file survived")
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Error("a temp file still being written was removed")
+	}
+}

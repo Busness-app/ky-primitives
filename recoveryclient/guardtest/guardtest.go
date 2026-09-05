@@ -46,7 +46,9 @@ func NoDecryptOutside(t testing.TB, repoRoot string, allowed map[string][]string
 		}
 		if d.IsDir() {
 			name := d.Name()
-			if path != repoRoot && (strings.HasPrefix(name, ".") || name == "node_modules" || name == "web" || name == "dist" || name == "vendor") {
+			// Only directories that cannot hold the product's own Go code are skipped by
+			// name. web/ and dist/ are walked: some layouts keep Go there.
+			if path != repoRoot && (strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor" || name == "testdata") {
 				return filepath.SkipDir
 			}
 			return nil
@@ -63,6 +65,7 @@ func NoDecryptOutside(t testing.TB, repoRoot string, allowed map[string][]string
 		if err != nil {
 			return err
 		}
+		rel, _ := filepath.Rel(repoRoot, path)
 		aliases := map[string]string{} // local name -> package key
 		for _, imp := range f.Imports {
 			p := strings.Trim(imp.Path.Value, `"`)
@@ -77,18 +80,30 @@ func NoDecryptOutside(t testing.TB, repoRoot string, allowed map[string][]string
 			if imp.Name != nil {
 				local = imp.Name.Name
 			}
+			if local == "." {
+				// A dot-import makes every forbidden call a bare identifier the alias table
+				// cannot resolve, so the file is refused outright.
+				t.Errorf("guardtest: %s dot-imports %s; import it by name so its calls can be checked", rel, p)
+				continue
+			}
 			aliases[local] = key
 		}
 		if len(aliases) == 0 {
 			return nil
 		}
-		rel, _ := filepath.Rel(repoRoot, path)
+		// Every declaration is inspected, not only function bodies: a package-level var
+		// initialiser can call a forbidden function too. A hit outside any function is
+		// attributed to the file and never allowed.
 		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
+			enclosing := ""
+			var body ast.Node = decl
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				if fn.Body == nil {
+					continue
+				}
+				enclosing, body = fn.Name.Name, fn.Body
 			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
+			ast.Inspect(body, func(n ast.Node) bool {
 				sel, ok := n.(*ast.SelectorExpr)
 				if !ok {
 					return true
@@ -101,10 +116,14 @@ func NoDecryptOutside(t testing.TB, repoRoot string, allowed map[string][]string
 				if !watched || !forbidden[key][sel.Sel.Name] {
 					return true
 				}
-				if slices.Contains(allowed[rel], fn.Name.Name) {
+				if enclosing != "" && slices.Contains(allowed[rel], enclosing) {
 					return true
 				}
-				t.Errorf("guardtest: %s calls %s.%s inside %s, which is not allowed to decrypt", fset.Position(sel.Pos()), key, sel.Sel.Name, fn.Name.Name)
+				where := "at package level"
+				if enclosing != "" {
+					where = "inside " + enclosing
+				}
+				t.Errorf("guardtest: %s calls %s.%s %s, which is not allowed to decrypt", fset.Position(sel.Pos()), key, sel.Sel.Name, where)
 				return true
 			})
 		}

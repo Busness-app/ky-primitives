@@ -669,7 +669,9 @@ What it pins, each by a named test:
 - A failed local copy never cancels the deposit; it rides in `Result.LocalError`
   (`TestRunLocalFailureDoesNotCancelTheDeposit`).
 - Local copies are `<AppName>-<capsule-id>.kycap` at 0600, written by temp file and rename,
-  and only that prefix is listed or pruned (`TestWriteLocalCopyPrunesOwnPrefixOnly`).
+  and only that prefix is listed or pruned (`TestWriteLocalCopyPrunesOwnPrefixOnly`). A
+  retention count below one is refused before anything is written, so a zero value can never
+  mean "delete everything" (`TestWriteLocalCopyRetention`).
 - The schedule is bounded in whole seconds before any `Duration` math, so 2^55 seconds
   cannot wrap to zero and read as off (`TestSetIntervalBoundsSeconds`); the next run counts
   from the last attempt (`TestNextRunCountsFromLastAttempt`).
@@ -685,8 +687,10 @@ What it pins, each by a named test:
   stay, and a half-cleared pairing still clears (`TestClearPairingKeepsKeyPinAndReceipt`,
   `TestClearPairingHalfClearedStillClears`). A pairing whose key will not resolve is
   `ErrKeyPinMissing`, reported, not skipped (`TestLoadPairingReportsKeyPinMissing`).
-- `Drill` seals to a throwaway key generated and dropped inside the call and wipes its 0700
-  scratch directory (`TestDrillOpensWhatItSealedAndWipesScratch`). `Restore` checks the
+- `Drill` seals to a throwaway key generated and dropped inside the call, works in a 0700
+  scratch directory under a root the product names (its data directory, never the system
+  temp dir), wipes it, and sweeps a killed drill's residue first
+  (`TestDrillOpensWhatItSealedAndWipesScratch`, `TestDrillUsesTheCallerScratchRoot`). `Restore` checks the
   manifest's service name before combining shares (`TestRestoreRefusesOtherServiceBeforeCombine`).
 - `SQLiteSnapshot` copies through the live handle with `VACUUM INTO`; copying the file misses
   every commit still in the write-ahead log. The lib has no SQLite driver, so the
@@ -719,8 +723,8 @@ mux.Handle("POST /api/sync", syncauth.Middleware(keyFn, syncauth.Options{Replay:
 
 Pinned: every bound field changes the verdict (`TestVerifyBindsEveryField`); a missing
 signature, a timestamp outside the window in either direction, and a short key each refuse
-(`TestVerifyRefusesMissingStaleAndShort`); the replay guard is bounded and forgets
-(`TestReplayGuard`); the middleware reads a bounded body, fails closed when the key is not
+(`TestVerifyRefusesMissingStaleAndShort`); the replay guard forgets only what has left the window and refuses with
+`ErrReplayGuardFull` rather than forget an ID it must remember (`TestReplayGuard`); the middleware reads a bounded body, fails closed when the key is not
 configured, and hands the handler exactly the bytes that were signed
 (`TestMiddlewareVerifiesAndReplaysTheBodyToTheHandler`); `FuzzVerify` accepts only the
 original tuple.
@@ -744,8 +748,10 @@ each standard claim is checked with one minute of leeway and an audience array i
 unless the product opts in (`TestVerifyRefusesEachBadClaim`); base64url must be unpadded so
 one token has one encoding; JWKS entries that are not RSA signing keys are ignored even under
 the right `kid` (`TestJWKSIgnoresNonRSAKeysUnderTheSameKid`); an unknown `kid` triggers at
-most one rate-limited refresh, and a stale key set outlives an issuer outage
-(`TestJWKSRefreshIsRateLimitedAndStaleSetSurvivesOutage`).
+most one rate-limited refresh whether the fetch succeeds or fails, the fetch runs outside
+the lock so concurrent verifications share it, and a stale key set outlives an issuer outage
+(`TestJWKSRefreshIsRateLimitedAndStaleSetSurvivesOutage`, `TestUnknownKidDoesNotStallVerification`,
+`TestConcurrentUnknownKidsShareOneFetch`).
 
 ## Contributing
 

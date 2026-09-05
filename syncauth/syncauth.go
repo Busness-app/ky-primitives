@@ -49,14 +49,19 @@ const (
 )
 
 var (
-	ErrNoSignature   = errors.New("syncauth: no signature")
-	ErrBadSignature  = errors.New("syncauth: signature does not match")
-	ErrBadTimestamp  = errors.New("syncauth: timestamp missing or not RFC3339")
-	ErrStale         = errors.New("syncauth: timestamp outside the accepted window")
-	ErrReplay        = errors.New("syncauth: event already seen")
-	ErrMissingFields = errors.New("syncauth: event type and event id are required")
-	ErrShortKey      = fmt.Errorf("syncauth: key must be at least %d bytes", MinKeyBytes)
-	ErrBodyTooLarge  = errors.New("syncauth: body exceeds the limit")
+	ErrNoSignature  = errors.New("syncauth: no signature")
+	ErrBadSignature = errors.New("syncauth: signature does not match")
+	ErrBadTimestamp = errors.New("syncauth: timestamp missing or not RFC3339")
+	ErrStale        = errors.New("syncauth: timestamp outside the accepted window")
+	ErrReplay       = errors.New("syncauth: event already seen")
+	// ErrReplayGuardFull means the in-memory guard holds max IDs all still inside the window
+	// and cannot admit another without forgetting one it must remember. The receiver logs
+	// that the guard is undersized; a persistent Replay backed by its processed-events table
+	// is the fix for sustained volume.
+	ErrReplayGuardFull = errors.New("syncauth: replay guard is full of events still inside the window")
+	ErrMissingFields   = errors.New("syncauth: event type and event id are required")
+	ErrShortKey        = fmt.Errorf("syncauth: key must be at least %d bytes", MinKeyBytes)
+	ErrBodyTooLarge    = errors.New("syncauth: body exceeds the limit")
 )
 
 // Event is what a verified request says about itself.
@@ -142,10 +147,12 @@ type Options struct {
 	Replay Replay
 }
 
-// Replay remembers accepted event IDs. Seen returns true if id was already recorded, and
-// records it otherwise. Implementations must be safe for concurrent use.
+// Replay remembers accepted event IDs. Check returns nil and records id when it is new,
+// ErrReplay when it was already recorded, or another error when it cannot decide (a guard
+// that is full, a table that is down); any error refuses the event. Implementations must be
+// safe for concurrent use.
 type Replay interface {
-	Seen(id string, at time.Time) bool
+	Check(id string, at time.Time) error
 }
 
 // Verify checks the headers against the body and the key. Every failure is one of the
@@ -157,7 +164,7 @@ func Verify(key []byte, h Headers, body []byte, o Options) (Event, error) {
 	if h.Signature == "" {
 		return Event{}, ErrNoSignature
 	}
-	if h.EventType == "" || h.EventID == "" {
+	if h.EventType == "" || h.EventID == "" || strings.ContainsAny(h.EventType+h.EventID, "\r\n") {
 		return Event{}, ErrMissingFields
 	}
 	at, err := time.Parse(time.RFC3339, h.Timestamp)
@@ -179,15 +186,18 @@ func Verify(key []byte, h Headers, body []byte, o Options) (Event, error) {
 	if !hmac.Equal([]byte(h.Signature), []byte(want)) {
 		return Event{}, ErrBadSignature
 	}
-	if o.Replay != nil && o.Replay.Seen(h.EventID, at) {
-		return Event{}, ErrReplay
+	if o.Replay != nil {
+		if err := o.Replay.Check(h.EventID, at); err != nil {
+			return Event{}, err
+		}
 	}
 	return Event{Type: h.EventType, ID: h.EventID, At: at}, nil
 }
 
-// memoryReplay is a bounded in-process replay guard: it forgets IDs older than the window
-// and refuses to grow past max entries, evicting the oldest, so it cannot be used to exhaust
-// memory.
+// memoryReplay is a bounded in-process replay guard. It forgets IDs only once their
+// timestamp has left the window; when it holds max IDs that are all still inside the window
+// it refuses with ErrReplayGuardFull rather than forgetting one, because a forgotten ID is a
+// replay the signature alone cannot stop.
 type memoryReplay struct {
 	mu     sync.Mutex
 	window time.Duration
@@ -198,7 +208,8 @@ type memoryReplay struct {
 
 // NewMemoryReplay returns a Replay that remembers up to max IDs for window. Use it when the
 // receiver has no table of processed events; a restart forgets everything, which is the
-// window's job to bound.
+// window's job to bound. Size max above the events one sender can emit in a window, or the
+// guard refuses under load.
 func NewMemoryReplay(window time.Duration, max int) Replay {
 	if window <= 0 {
 		window = DefaultWindow
@@ -209,24 +220,27 @@ func NewMemoryReplay(window time.Duration, max int) Replay {
 	return &memoryReplay{window: window, max: max, seen: map[string]time.Time{}}
 }
 
-func (m *memoryReplay) Seen(id string, at time.Time) bool {
+func (m *memoryReplay) Check(id string, at time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	cutoff := time.Now().Add(-2 * m.window)
+	cutoff := time.Now().Add(-m.window)
 	for len(m.order) > 0 {
 		oldest := m.order[0]
-		if t, ok := m.seen[oldest]; ok && t.After(cutoff) && len(m.order) < m.max {
+		if t, ok := m.seen[oldest]; ok && t.After(cutoff) {
 			break
 		}
 		delete(m.seen, oldest)
 		m.order = m.order[1:]
 	}
 	if _, ok := m.seen[id]; ok {
-		return true
+		return ErrReplay
+	}
+	if len(m.order) >= m.max {
+		return ErrReplayGuardFull
 	}
 	m.seen[id] = at
 	m.order = append(m.order, id)
-	return false
+	return nil
 }
 
 type ctxKey struct{}

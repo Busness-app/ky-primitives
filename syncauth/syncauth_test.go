@@ -100,15 +100,36 @@ func TestReplayGuard(t *testing.T) {
 	if _, err := Verify(key, h, body, o); !errors.Is(err, ErrReplay) {
 		t.Fatalf("replay accepted: %v", err)
 	}
-	// Bounded: the third distinct ID evicts the first, which then verifies again.
-	for _, id := range []string{"evt-2", "evt-3"} {
-		h2, _ := Sign(key, now, "t", id, body)
-		if _, err := Verify(key, h2, body, o); err != nil {
-			t.Fatal(err)
-		}
+	// Full of IDs still inside the window: refuse rather than forget one.
+	h2, _ := Sign(key, now, "t", "evt-2", body)
+	if _, err := Verify(key, h2, body, o); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := Verify(key, h, body, o); err != nil {
-		t.Fatalf("eviction did not happen: %v", err)
+	h3, _ := Sign(key, now, "t", "evt-3", body)
+	if _, err := Verify(key, h3, body, o); !errors.Is(err, ErrReplayGuardFull) {
+		t.Fatalf("full guard: %v", err)
+	}
+	if _, err := Verify(key, h, body, o); !errors.Is(err, ErrReplay) {
+		t.Fatalf("a full guard forgot an ID inside the window: %v", err)
+	}
+	// Once entries leave the window they are forgotten and room returns.
+	old := NewMemoryReplay(time.Millisecond, 1)
+	if err := old.Check("a", now); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if err := old.Check("b", now); err != nil {
+		t.Fatalf("expired entry not evicted: %v", err)
+	}
+}
+
+func TestVerifyRefusesNewlinesInHeaders(t *testing.T) {
+	body := []byte("x")
+	now := time.Now()
+	h, _ := Sign(key, now, "t", "id", body)
+	h.EventType = "t\nx"
+	if _, err := Verify(key, h, body, Options{Now: func() time.Time { return now }}); !errors.Is(err, ErrMissingFields) {
+		t.Fatalf("%v", err)
 	}
 }
 

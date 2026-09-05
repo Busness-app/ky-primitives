@@ -11,8 +11,8 @@ import (
 // SQLiteSnapshot writes a transactionally consistent copy of the live database to destPath
 // through the live connection with VACUUM INTO. Copying the database file is not a backup in
 // WAL mode: every commit still in the -wal is missing from the copy, silently. destPath must
-// not exist; the caller owns the directory it lands in (a 0700 scratch dir, removed after
-// sealing). Works with any driver that speaks SQLite; the lib has none, so the product's
+// not exist; it is set to 0600 after the copy, and the caller owns the directory it lands in
+// (a 0700 scratch dir, removed after sealing). Works with any driver that speaks SQLite; the lib has none, so the product's
 // tests are where the row-in-the-WAL case is proven.
 func SQLiteSnapshot(ctx context.Context, db *sql.DB, destPath string) error {
 	if db == nil {
@@ -25,6 +25,9 @@ func SQLiteSnapshot(ctx context.Context, db *sql.DB, destPath string) error {
 	}
 	if _, err := db.ExecContext(ctx, "VACUUM INTO ?", destPath); err != nil {
 		return fmt.Errorf("recoveryclient: VACUUM INTO failed: %w", err)
+	}
+	if err := os.Chmod(destPath, 0600); err != nil {
+		return fmt.Errorf("recoveryclient: snapshot mode: %w", err)
 	}
 	info, err := os.Stat(destPath)
 	if err != nil {

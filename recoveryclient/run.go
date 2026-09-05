@@ -77,6 +77,9 @@ func Run(ctx context.Context, cfg RunConfig, settings Settings, collect func() (
 	if !paired && cfg.BackupDir == "" {
 		return Result{}, ErrNoDestination
 	}
+	if cfg.BackupDir != "" && cfg.Keep < 1 {
+		return Result{}, ErrBadKeep
+	}
 	payload, err := collect()
 	if err != nil {
 		return Result{}, err

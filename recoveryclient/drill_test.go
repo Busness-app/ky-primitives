@@ -9,7 +9,7 @@ import (
 
 func TestDrillOpensWhatItSealedAndWipesScratch(t *testing.T) {
 	var seen string
-	res, err := Drill(context.Background(), testPayload(), func(dir string) []Check {
+	res, err := Drill(context.Background(), t.TempDir(), testPayload(), func(dir string) []Check {
 		seen = dir
 		b, err := os.ReadFile(filepath.Join(dir, "data", "app.db"))
 		info, _ := os.Stat(dir)
@@ -24,7 +24,7 @@ func TestDrillOpensWhatItSealedAndWipesScratch(t *testing.T) {
 }
 
 func TestDrillFailsWhenAProductCheckFails(t *testing.T) {
-	res, err := Drill(context.Background(), testPayload(), func(string) []Check {
+	res, err := Drill(context.Background(), t.TempDir(), testPayload(), func(string) []Check {
 		return []Check{{Name: "admin", Passed: false, Message: "no active admin"}}
 	})
 	if err != nil || res.Passed || res.ErrorMessage != "admin: no active admin" {
@@ -33,8 +33,33 @@ func TestDrillFailsWhenAProductCheckFails(t *testing.T) {
 }
 
 func TestDrillReportsASealItCannotPerform(t *testing.T) {
-	res, err := Drill(context.Background(), Payload{ServiceName: "Svc"}, nil)
+	res, err := Drill(context.Background(), t.TempDir(), Payload{ServiceName: "Svc"}, nil)
 	if err != nil || res.Passed || len(res.Checks) != 1 || res.Checks[0].Name != "Seal" {
 		t.Fatalf("%v %+v", err, res)
+	}
+}
+
+func TestDrillUsesTheCallerScratchRoot(t *testing.T) {
+	root := t.TempDir()
+	stale := filepath.Join(root, drillPrefix+"stale")
+	if err := os.MkdirAll(stale, 0700); err != nil {
+		t.Fatal(err)
+	}
+	var seen string
+	res, err := Drill(context.Background(), root, testPayload(), func(dir string) []Check {
+		seen = dir
+		return []Check{{Name: "ok", Passed: true}}
+	})
+	if err != nil || !res.Passed {
+		t.Fatalf("%v %+v", err, res)
+	}
+	if filepath.Dir(seen) != root {
+		t.Errorf("scratch %s not under %s", seen, root)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Error("stale drill directory survived")
+	}
+	if _, err := Drill(context.Background(), "", testPayload(), nil); err != ErrNoScratchRoot {
+		t.Errorf("empty root: %v", err)
 	}
 }

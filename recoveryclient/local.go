@@ -1,6 +1,7 @@
 package recoveryclient
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,33 @@ import (
 	"strings"
 	"time"
 )
+
+// ErrBadKeep is returned when the retention count is below one. The zero value must never
+// mean "delete everything": an adapter that forgets to set Keep would otherwise prune the
+// capsule it just wrote and report success.
+var ErrBadKeep = errors.New("recoveryclient: keep must be at least 1")
+
+// tempPrefix marks in-progress writes. A temp file older than staleTemp was left by a
+// process that died mid-write and is removed on the next write.
+const (
+	tempPrefix = ".kycap-"
+	staleTemp  = time.Hour
+)
+
+func sweepStaleTemp(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), tempPrefix) {
+			continue
+		}
+		if info, err := e.Info(); err == nil && time.Since(info.ModTime()) > staleTemp {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
+}
 
 // LocalCopy is one sealed capsule in the local backup directory.
 type LocalCopy struct {
@@ -29,11 +57,15 @@ func localPrefix(appName string) string {
 // goes through a temp file and rename so a crash never leaves a truncated .kycap that looks
 // like a backup.
 func WriteLocalCopy(dir, appName, capsuleID string, raw []byte, keep int) (string, error) {
+	if keep < 1 {
+		return "", ErrBadKeep
+	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", fmt.Errorf("backup dir: %w", err)
 	}
+	sweepStaleTemp(dir)
 	final := filepath.Join(dir, localPrefix(appName)+FilenameSafe(capsuleID)+".kycap")
-	tmp, err := os.CreateTemp(dir, ".kycap-*")
+	tmp, err := os.CreateTemp(dir, tempPrefix+"*")
 	if err != nil {
 		return "", fmt.Errorf("backup dir: %w", err)
 	}

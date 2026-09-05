@@ -146,3 +146,16 @@ func TestOutcomeBoundsEveryField(t *testing.T) {
 		t.Errorf("%s %v", outcome, details)
 	}
 }
+
+func TestRunRefusesABadKeepBeforeCollecting(t *testing.T) {
+	dir, s := t.TempDir(), memSettings{}
+	_, k := testKey(t)
+	_ = StoreRecoveryKey(dir, s, k)
+	cfg := runCfg(dir, testSealer(t))
+	cfg.BackupDir = t.TempDir()
+	cfg.Keep = 0
+	collected := false
+	if _, err := Run(context.Background(), cfg, s, func() (Payload, error) { collected = true; return testPayload(), nil }, &fakeDepositor{}); !errors.Is(err, ErrBadKeep) || collected {
+		t.Fatalf("%v collected=%v", err, collected)
+	}
+}

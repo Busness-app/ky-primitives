@@ -46,7 +46,7 @@ func Restore(capsulePath, targetDir, expectService string, shareStrings []string
 		return err
 	}
 	fmt.Fprintf(stdout, "Restored %d files from capsule %s\n  service:      %s (v%s)\n  created:      %s\n  recovery key: %s\n  payload hash: %s\n",
-		len(files), m.CapsuleID, m.ServiceName, m.AppVersion, m.CreatedAt.Format(time.RFC3339), m.RecoveryKeyID, m.PayloadHash)
+		len(files), AuditSafe(m.CapsuleID), AuditSafe(m.ServiceName), AuditSafe(m.AppVersion), m.CreatedAt.Format(time.RFC3339), AuditSafe(m.RecoveryKeyID), AuditSafe(m.PayloadHash))
 	return nil
 }
 

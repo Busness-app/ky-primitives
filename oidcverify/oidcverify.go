@@ -83,9 +83,11 @@ type Verifier struct {
 	// MaxAge is how long a fetched key set is trusted before a refresh. Default 1h.
 	MaxAge time.Duration
 
-	mu        sync.Mutex
-	keys      map[string]*rsa.PublicKey
-	fetchedAt time.Time
+	mu          sync.Mutex // guards keys, fetchedAt, attemptedAt
+	fetchMu     sync.Mutex // single-flight for the HTTP fetch; never held with mu
+	keys        map[string]*rsa.PublicKey
+	fetchedAt   time.Time
+	attemptedAt time.Time
 }
 
 type jwk struct {
@@ -268,9 +270,12 @@ func numericDate(raw json.RawMessage) (time.Time, error) {
 	return time.Unix(int64(f), 0), nil
 }
 
+// key returns the RSA key for kid. The cached set is used while fresh; an unknown kid or a
+// stale set triggers a refresh, at most once per MinRefresh whether the fetch succeeds or
+// fails, so an attacker-chosen kid cannot make every request pay the issuer's timeout. The
+// HTTP fetch runs outside the state mutex under its own single-flight lock, so concurrent
+// verifications share one fetch instead of queueing behind it.
 func (v *Verifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) {
-	v.mu.Lock()
-	defer v.mu.Unlock()
 	maxAge := v.MaxAge
 	if maxAge == 0 {
 		maxAge = time.Hour
@@ -280,16 +285,45 @@ func (v *Verifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) 
 		minRefresh = 30 * time.Second
 	}
 	now := v.now()
-	if k, ok := v.keys[kid]; ok && now.Sub(v.fetchedAt) < maxAge {
+
+	v.mu.Lock()
+	k, known := v.keys[kid]
+	fresh := now.Sub(v.fetchedAt) < maxAge
+	recentAttempt := !v.attemptedAt.IsZero() && now.Sub(v.attemptedAt) < minRefresh
+	v.mu.Unlock()
+	if known && fresh {
 		return k, nil
 	}
-	if !v.fetchedAt.IsZero() && now.Sub(v.fetchedAt) < minRefresh {
-		if k, ok := v.keys[kid]; ok {
+	if recentAttempt {
+		if known {
 			return k, nil
 		}
 		return nil, ErrUnknownKey
 	}
+
+	v.fetchMu.Lock()
+	defer v.fetchMu.Unlock()
+	// Another verification may have fetched while this one waited.
+	v.mu.Lock()
+	if k, ok := v.keys[kid]; ok && v.now().Sub(v.fetchedAt) < maxAge {
+		v.mu.Unlock()
+		return k, nil
+	}
+	if !v.attemptedAt.IsZero() && v.now().Sub(v.attemptedAt) < minRefresh {
+		k, ok := v.keys[kid]
+		v.mu.Unlock()
+		if ok {
+			return k, nil
+		}
+		return nil, ErrUnknownKey
+	}
+	v.attemptedAt = v.now()
+	v.mu.Unlock()
+
 	keys, err := v.fetch(ctx)
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
 	if err != nil {
 		// A stale set beats no set: the issuer being unreachable must not log everyone out.
 		if k, ok := v.keys[kid]; ok {
@@ -298,7 +332,7 @@ func (v *Verifier) key(ctx context.Context, kid string) (*rsa.PublicKey, error) 
 		return nil, err
 	}
 	v.keys = keys
-	v.fetchedAt = now
+	v.fetchedAt = v.now()
 	if k, ok := v.keys[kid]; ok {
 		return k, nil
 	}

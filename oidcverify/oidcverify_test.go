@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -265,5 +266,61 @@ func TestMiddleware(t *testing.T) {
 	}
 	if len(rejected) != 4 {
 		t.Errorf("rejections %v", rejected)
+	}
+}
+
+func TestUnknownKidDoesNotStallVerification(t *testing.T) {
+	is := newIssuer(t)
+	v := is.verifier()
+	if _, err := v.Verify(context.Background(), is.mint(nil, good(is), nil)); err != nil {
+		t.Fatal(err)
+	}
+	// The issuer now hangs. Unknown kids may trigger at most one refresh per MinRefresh,
+	// and that one costs at most the client timeout.
+	release := make(chan struct{})
+	entered := atomic.Int32{}
+	hang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		entered.Add(1)
+		<-release
+	}))
+	defer func() { close(release); hang.Close() }()
+	v.JWKSURL = hang.URL + "/.well-known/jwks.json"
+	v.HTTPClient = &http.Client{Timeout: 200 * time.Millisecond}
+	v.MinRefresh = time.Hour
+	// Only the cached set is fresh for known kids; force a stale set so a known kid would
+	// also want a refresh, then check it is served from the stale set without waiting.
+	start := time.Now()
+	for i := 0; i < 20; i++ {
+		_, err := v.Verify(context.Background(), is.mint(map[string]any{"alg": "RS256", "kid": "k-unknown"}, good(is), nil))
+		if !errors.Is(err, ErrUnknownKey) && !errors.Is(err, ErrJWKS) {
+			t.Fatalf("unknown kid: %v", err)
+		}
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("20 unknown-kid verifications took %s; the failed fetch is not rate-limited", d)
+	}
+	if n := entered.Load(); n > 2 {
+		t.Fatalf("issuer entered %d times", n)
+	}
+	if _, err := v.Verify(context.Background(), is.mint(nil, good(is), nil)); err != nil {
+		t.Fatalf("known kid during outage: %v", err)
+	}
+}
+
+func TestConcurrentUnknownKidsShareOneFetch(t *testing.T) {
+	is := newIssuer(t)
+	v := is.verifier()
+	v.MinRefresh = time.Hour
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = v.Verify(context.Background(), is.mint(nil, good(is), nil))
+		}()
+	}
+	wg.Wait()
+	if n := is.fetches.Load(); n != 1 {
+		t.Fatalf("%d fetches for one cold start", n)
 	}
 }
