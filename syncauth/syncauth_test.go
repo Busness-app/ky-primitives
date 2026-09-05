@@ -32,7 +32,7 @@ func TestSignVerifyRoundTrip(t *testing.T) {
 
 func TestVerifyBindsEveryField(t *testing.T) {
 	body := []byte(`{"a":1}`)
-	now := time.Now()
+	now := time.Date(2026, 9, 4, 23, 0, 7, 0, time.UTC)
 	h, _ := Sign(key, now, "user.created", "evt-1", body)
 	cases := map[string]func(Headers, []byte) (Headers, []byte){
 		"body":       func(h Headers, b []byte) (Headers, []byte) { return h, []byte(`{"a":2}`) },
@@ -43,7 +43,11 @@ func TestVerifyBindsEveryField(t *testing.T) {
 			return h, b
 		},
 		"signature bit": func(h Headers, b []byte) (Headers, []byte) {
-			h.Signature = h.Signature[:len(h.Signature)-1] + "0"
+			replacement := "0"
+			if strings.HasSuffix(h.Signature, replacement) {
+				replacement = "1"
+			}
+			h.Signature = h.Signature[:len(h.Signature)-1] + replacement
 			return h, b
 		},
 		"other key": func(h Headers, b []byte) (Headers, []byte) {

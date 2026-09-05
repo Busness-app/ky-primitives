@@ -37,10 +37,22 @@ type Options struct {
 	AllowPrivate bool
 }
 
+// ErrPrivateDestination means a destination was refused because AllowPrivate is false,
+// and enabling it would admit at least one address. Use errors.Is on ValidateURL,
+// ClaimPairing or Deposit errors to offer the product's private-network opt-in.
+// It does not identify loopback/reserved addresses that remain forbidden with the opt-in,
+// or DNS lookup, connection, TLS, and remote-server failures.
+var ErrPrivateDestination = errors.New("recoveryclient: private destinations are disabled")
+
 // NewClient builds the client. With Options.AllowPrivate:
 // with it, a KyRecovery on the operator's LAN is dialled; without it, only public addresses.
 // HTTPS is required either way.
 func NewClient(o Options) *Client {
+	return newClient(o, net.DefaultResolver.LookupIP)
+}
+
+// newClient keeps DNS resolution injectable in tests while exercising the real transport.
+func newClient(o Options, lookupIP func(context.Context, string, string) ([]net.IP, error)) *Client {
 	allowPrivate := o.AllowPrivate
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	transport := &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -48,19 +60,21 @@ func NewClient(o Options) *Client {
 		if err != nil {
 			return nil, err
 		}
-		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		ips, err := lookupIP(ctx, "ip", host)
 		if err != nil {
 			return nil, err
 		}
+		privateDestination := false
 		for _, ip := range ips {
 			if allowedIP(ip, allowPrivate) {
 				return dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 			}
+			privateDestination = privateDestination || allowedIP(ip, true)
 		}
-		if allowPrivate {
-			return nil, errors.New("recovery host resolves only to loopback or unroutable addresses")
+		if !allowPrivate && privateDestination {
+			return nil, fmt.Errorf("recovery host resolves only to private or reserved addresses: %w; set the private-destination option for a KyRecovery on your own network", ErrPrivateDestination)
 		}
-		return nil, errors.New("recovery host resolves only to private or reserved addresses; set the private-destination option for a KyRecovery on your own network")
+		return nil, errors.New("recovery host resolves only to loopback or unroutable addresses")
 	}}
 	client := &http.Client{Timeout: 30 * time.Second, Transport: transport, CheckRedirect: refuseRedirect}
 	return &Client{client: client, allowPrivate: allowPrivate}
@@ -87,10 +101,10 @@ func ValidateURL(raw string, allowPrivate bool) error {
 		return errors.New("recovery URL must not carry a query string or fragment")
 	}
 	if ip := net.ParseIP(u.Hostname()); ip != nil && !allowedIP(ip, allowPrivate) {
-		if allowPrivate {
-			return errors.New("recovery URL cannot target a loopback or unroutable address")
+		if !allowPrivate && allowedIP(ip, true) {
+			return fmt.Errorf("recovery URL cannot target a private or reserved address: %w; set the private-destination option for a KyRecovery on your own network", ErrPrivateDestination)
 		}
-		return errors.New("recovery URL cannot target a private or reserved address; set the private-destination option for a KyRecovery on your own network")
+		return errors.New("recovery URL cannot target a loopback or unroutable address")
 	}
 	return nil
 }
