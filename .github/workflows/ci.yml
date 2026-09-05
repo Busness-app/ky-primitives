@@ -28,6 +28,26 @@ jobs:
       - run: go vet ./...
       - run: go test -race -count=1 ./...
 
+  offsite:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        go: ['1.26.x', 'stable']
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: offsite
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - run: test -z "$(gofmt -l .)"
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+
   vulncheck:
     # nodeps_test.go pins which dependencies are allowed. It says nothing about which
     # versions, and x/crypto is where a password-hashing CVE would land.
@@ -38,3 +58,5 @@ jobs:
         with:
           go-version: 'stable'
       - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        working-directory: offsite

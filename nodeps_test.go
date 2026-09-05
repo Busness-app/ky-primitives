@@ -1,6 +1,7 @@
 package kyprimitives
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -86,6 +87,15 @@ func TestOnlyPasswordImportsADependency(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
+			// A nested module owns its own dependency budget. Walking into it would
+			// make this root-module test reject dependencies its go.mod cannot expose.
+			if path != "." {
+				if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
+					return fs.SkipDir
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+			}
 			name := d.Name()
 			if path != "." && (name == "password" || name == "testdata" || strings.HasPrefix(name, ".")) {
 				return fs.SkipDir
