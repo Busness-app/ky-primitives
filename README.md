@@ -638,6 +638,129 @@ lets one account present as many and quietly multiplies any per-account budget a
 would pull `x/crypto` into it — but `derive.MaxConcurrent`, `password.MaxMemoryKiB` and
 `password.MaxLanes` are exported so a product running both can add them up.
 
+## recoveryclient
+
+The product side of the suite's backup contract with KyRecovery. Four products carried
+divergent copies of this code, two of them hand-rolled with their own key-pin and token
+semantics; a prune that deletes every `.kycap` in a directory, or a pin that accepts a second
+key, loses data silently, which is the admission bar. kysignon-server was the reference and
+is the first consumer.
+
+The product supplies four things: a `Settings` row store (mapping its not-found error to
+`recoveryclient.ErrNotFound`), a `Sealer` under its deployment key (or `NewAESGCMSealer`),
+a `collect` func that says what to seal, and a `checks` func for the drill. Config, HTTP
+handlers, step-up, UI, audit API, compose and docs stay in the product.
+
+```go
+sealer, _ := recoveryclient.NewAESGCMSealer(cfg.EncryptionKey, "myapp:setting:kyrecovery_token")
+client := recoveryclient.NewClient(recoveryclient.Options{AllowPrivate: cfg.AllowPrivateRecovery})
+res, err := recoveryclient.Run(ctx, recoveryclient.RunConfig{
+	DataDir: cfg.DataDir, AppName: cfg.AppName, AppVersion: version,
+	BackupDir: cfg.BackupDir, Keep: cfg.BackupKeep, Sealer: sealer,
+}, settings, collectPayload, client)
+action, outcome, details := recoveryclient.Outcome(res, err)
+```
+
+What it pins, each by a named test:
+
+- One run seals once and delivers to every configured destination; a key with nowhere to
+  go is `ErrNoDestination`, and `collect` never runs before that is known
+  (`TestRunNeedsAKeyThenADestination`, `TestRunPairedDeliversToBothAndRecordsReceipt`).
+- A failed local copy never cancels the deposit; it rides in `Result.LocalError`
+  (`TestRunLocalFailureDoesNotCancelTheDeposit`).
+- Local copies are `<AppName>.<capsule-id>.kycap` at 0600 (the app name escaped reversibly
+  into `[A-Za-z0-9-_]`, so distinct names never share a prefix and no name can be another's
+  prefix plus the delimiter), written by temp file and rename,
+  and only that prefix is listed or pruned (`TestWriteLocalCopyPrunesOwnPrefixOnly`,
+  `TestLocalCopiesOfAPrefixedAppNameAreInvisibleToTheShorterName`,
+  `TestLocalCopiesOfCollidingNamesStaySeparate`). A
+  retention count below one is refused before anything is written, so a zero value can never
+  mean "delete everything" (`TestWriteLocalCopyRetention`).
+- The schedule is bounded in whole seconds before any `Duration` math, on the way in and on
+  the way out, so a stored 2^55 seconds cannot wrap to zero and read as off and a stored
+  negative cannot make every tick due (`TestSetIntervalBoundsSeconds`,
+  `TestIntervalRefusesAStoredValueOutsideTheBound`); the next run counts
+  from the last attempt (`TestNextRunCountsFromLastAttempt`).
+- The key pin is write-once and the settings row decides, not the file
+  (`TestStoreRecoveryKeyIsWriteOnce`, `TestLoadRecoveryKeyDetectsSwappedFile`).
+- URLs are HTTPS without credentials, query or fragment; private and carrier-grade NAT
+  destinations need `Options.AllowPrivate`; loopback, link-local, multicast, unspecified and
+  reserved never pass (`TestValidateURL*`). Redirects are refused (`TestClientRefusesRedirect`).
+- A receipt must describe the bytes sent, and one naming another capsule is `ErrRemote` and
+  unrecorded (`TestDepositRefusesReceiptThatDoesNotDescribeBytesSent`,
+  `TestRunReceiptForOtherCapsuleIsRemoteAndUnrecorded`).
+- `ClearPairing` removes the URL and token rows and nothing else; the key pin and receipts
+  stay, and a half-cleared pairing still clears (`TestClearPairingKeepsKeyPinAndReceipt`,
+  `TestClearPairingHalfClearedStillClears`). A pairing whose key will not resolve is
+  `ErrKeyPinMissing`, reported, not skipped (`TestLoadPairingReportsKeyPinMissing`).
+- `Drill` seals to a throwaway key generated and dropped inside the call, works in a 0700
+  scratch directory under a root the product names (its data directory, never the system
+  temp dir), wipes it, and sweeps a killed drill's residue first
+  (`TestDrillOpensWhatItSealedAndWipesScratch`, `TestDrillUsesTheCallerScratchRoot`). `Restore` checks the
+  manifest's service name before combining shares (`TestRestoreRefusesOtherServiceBeforeCombine`).
+- `SQLiteSnapshot` copies through the live handle with `VACUUM INTO`; copying the file misses
+  every commit still in the write-ahead log. The lib has no SQLite driver, so the
+  row-in-the-WAL case is proven in each product's tests.
+- `guardtest.NoDecryptOutside` walks a product's repository from an absolute root, fails on
+  fewer than ten files, and names any call of `capsule.Open`, `recoverykey.Combine`,
+  `recoverykey.FromSeed` or `recoveryclient.Restore` outside the functions the product lists
+  (`TestGuardCatchesPlantedOpen`). The lib runs it on itself.
+
+## syncauth
+
+One definition of how KySignOn signs a directory-sync event and how a product verifies it.
+Before this, the sender signed the timestamp and body and at least one receiver verified the
+body alone, so the two sides could not agree; and the signing secret also travelled as the
+bearer token on every request. A receiver that accepts a forged deprovision, or that never
+sees a real one, cannot tell either from a good event, which is the admission bar.
+
+Scheme v1: HMAC-SHA256 over a canonical string binding the timestamp, the event type, the
+event ID and the SHA-256 of the body, carried as `X-KySignOn-Signature: v1=<hex>` with the
+timestamp, type and ID in their own headers. The key travels nowhere.
+
+```go
+// sender
+h, _ := syncauth.Sign(secret, time.Now(), "user.deprovisioned", eventID, body)
+h.Apply(req)
+
+// receiver
+mux.Handle("POST /api/sync", syncauth.Middleware(keyFn, syncauth.Options{Replay: syncauth.NewMemoryReplay(0, 0)}, 0, logReject)(handler))
+```
+
+Pinned: every bound field changes the verdict (`TestVerifyBindsEveryField`); a missing
+signature, a timestamp outside the window in either direction, and a short key each refuse
+(`TestVerifyRefusesMissingStaleAndShort`); the replay guard forgets only what has left the window and refuses with
+`ErrReplayGuardFull` rather than forget an ID it must remember (`TestReplayGuard`); the middleware reads a bounded body, fails closed when the key is not
+configured, and hands the handler exactly the bytes that were signed
+(`TestMiddlewareVerifiesAndReplaysTheBodyToTheHandler`); `FuzzVerify` accepts only the
+original tuple.
+
+## oidcverify
+
+Verifies the RS256 tokens KySignOn issues against its JWKS, on the standard library. Five
+products parsed these with their own code, and at least one read the claims without checking
+the signature. One wrong check of `alg`, `aud`, `iss`, `exp` or `kid` accepts a token it
+should not.
+
+```go
+v := &oidcverify.Verifier{Issuer: cfg.IssuerURL, Audience: cfg.ClientID}
+claims, err := v.VerifyWithNonce(ctx, idToken, session.Nonce)
+mux.Handle("GET /api/me", v.Middleware(logReject)(handler))
+```
+
+Pinned: the issuer and JWKS URL must be HTTPS and the fetch follows no redirect, checked
+before any request is made (`TestPlaintextIssuerIsRefusedWithoutARequest`,
+`TestJWKSRedirectIsRefused`); the algorithm is RS256 or nothing, so `none`, `HS256` and an empty signature segment
+are refused before any key work (`TestVerifyRefusesAlgorithmConfusionAndBadSignatures`);
+each standard claim is checked with one minute of leeway and an audience array is refused
+unless the product opts in (`TestVerifyRefusesEachBadClaim`); base64url must be unpadded so
+one token has one encoding; JWKS entries that are not RSA signing keys are ignored even under
+the right `kid` (`TestJWKSIgnoresNonRSAKeysUnderTheSameKid`); an unknown `kid` triggers at
+most one rate-limited refresh whether the fetch succeeds or fails, the fetch runs outside
+the lock so concurrent verifications share it, and a stale key set outlives an issuer outage
+(`TestJWKSRefreshIsRateLimitedAndStaleSetSurvivesOutage`, `TestUnknownKidDoesNotStallVerification`,
+`TestConcurrentUnknownKidsShareOneFetch`).
+
 ## Contributing
 
 Nothing in this repository builds its consumers. The check that does lives in each of them:
