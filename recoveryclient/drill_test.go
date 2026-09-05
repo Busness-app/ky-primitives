@@ -80,7 +80,7 @@ func TestDrillUsesTheCallerScratchRoot(t *testing.T) {
 // drill exercises the same shape a real restore reads.
 func TestDrillHandsChecksTheOpenedManifest(t *testing.T) {
 	p := testPayload()
-	p.VerificationRecipe = map[string]any{"required_files": []string{"data/app.db"}, "check": true}
+	p.VerificationRecipe = map[string]any{"required_files": []string{"data/app.db", "../escape"}, "check": true}
 	var got capsule.Manifest
 	res, err := Drill(context.Background(), t.TempDir(), p, func(_ string, m capsule.Manifest) []Check {
 		got = m
@@ -94,7 +94,7 @@ func TestDrillHandsChecksTheOpenedManifest(t *testing.T) {
 		t.Fatalf("manifest %+v", got)
 	}
 	files, ok := recipe["required_files"].([]any)
-	if !ok || len(files) != 1 || files[0] != "data/app.db" {
+	if !ok || len(files) != 2 || files[0] != "data/app.db" || files[1] != "../escape" {
 		t.Fatalf("recipe after the round trip is %T %v; checks must handle the JSON shape", recipe["required_files"], recipe["required_files"])
 	}
 }

@@ -39,7 +39,8 @@ type Pairing struct {
 // StorePairing records the server URL and the bearer token after StoreRecoveryKey has pinned
 // the key. The token is sealed by the product's Sealer before it reaches the row.
 func StorePairing(settings Settings, sealer Sealer, serverURL, token string) error {
-	if strings.TrimSpace(token) == "" {
+	token = strings.TrimSpace(token)
+	if token == "" {
 		return errors.New("recoveryclient: refusing to store an empty KyRecovery token")
 	}
 	sealed, err := sealer.Seal([]byte(token))

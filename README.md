@@ -695,7 +695,8 @@ What it pins, each by a named test:
   `ErrKeyPinMissing`, reported, not skipped (`TestLoadPairingReportsKeyPinMissing`).
 - `Drill` seals to a throwaway key generated and dropped inside the call, hands the checks
   the manifest as read back from the opened capsule so they see the JSON-shaped recipe a real
-  restore sees (`TestDrillHandsChecksTheOpenedManifest`), works in a 0700
+  restore sees. Recipe values are authenticated but caller-authored, so checks validate types
+  and clean relative paths before acting (`TestDrillHandsChecksTheOpenedManifest`), works in a 0700
   scratch directory under a root the product names (its data directory, never the system
   temp dir), wipes it, and sweeps a killed drill's residue first
   (`TestDrillOpensWhatItSealedAndWipesScratch`, `TestDrillUsesTheCallerScratchRoot`). `Restore` checks the

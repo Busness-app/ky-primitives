@@ -19,6 +19,24 @@ func TestStorePairingRefusesEmptyToken(t *testing.T) {
 	}
 }
 
+func TestStorePairingTrimsToken(t *testing.T) {
+	dir, s := t.TempDir(), memSettings{}
+	_, key := testKey(t)
+	if err := StoreRecoveryKey(dir, s, key); err != nil {
+		t.Fatal(err)
+	}
+	if err := StorePairing(s, testSealer(t), "https://r.test", " tok\n"); err != nil {
+		t.Fatal(err)
+	}
+	p, err := LoadPairing(dir, s, testSealer(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Token != "tok" {
+		t.Fatalf("token = %q, want trimmed token", p.Token)
+	}
+}
+
 func TestHasPairingNeverDecrypts(t *testing.T) {
 	s := memSettings{}
 	if err := StorePairing(s, fatalSealer{t}, "https://r.test", "tok"); err != nil {
