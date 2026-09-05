@@ -40,11 +40,14 @@ var ErrNoScratchRoot = errors.New("recoveryclient: drill needs a scratch root in
 
 // Drill proves the payload restores: it seals to a throwaway key generated and discarded
 // inside this call, opens the capsule into a 0700 scratch directory under scratchRoot wiped
-// on return, and appends the product's checks, which see only the scratch directory path.
-// Stale scratch directories left under scratchRoot by a killed drill are removed first. The
-// suite key is never involved, so a passing drill says the format restores, not that the
-// custodians' cards do; that is what the product's restore runbook is for.
-func Drill(ctx context.Context, scratchRoot string, payload Payload, checks func(dir string) []Check) (*DrillResult, error) {
+// on return, and appends the product's checks. Checks receive the opened manifest; its
+// recipe and dependency values are authenticated but caller-authored, so product code must
+// type-check them and reject paths that are not clean relative paths inside dir before
+// acting on them. Stale scratch directories left under scratchRoot by a killed drill are
+// removed first. The suite key is never involved, so a passing drill says the format
+// restores, not that the custodians' cards do; that is what the product's restore runbook
+// is for.
+func Drill(ctx context.Context, scratchRoot string, payload Payload, checks func(dir string, opened capsule.Manifest) []Check) (*DrillResult, error) {
 	if scratchRoot == "" {
 		return nil, ErrNoScratchRoot
 	}
@@ -106,7 +109,7 @@ func Drill(ctx context.Context, scratchRoot string, payload Payload, checks func
 	}
 	pass("Directory Unpack", fmt.Sprintf("%d files extracted into a 0700 sandbox", len(files)))
 	if checks != nil {
-		result.Checks = append(result.Checks, checks(dir)...)
+		result.Checks = append(result.Checks, checks(dir, opened)...)
 	}
 	return finish()
 }

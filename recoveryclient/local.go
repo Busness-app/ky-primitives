@@ -55,6 +55,10 @@ func localPrefix(appName string) string {
 	return appNameSafe(appName) + "."
 }
 
+// LocalPrefix is the filename prefix this package gives appName's local copies, exported so
+// a product can migrate files written under an earlier scheme into it.
+func LocalPrefix(appName string) string { return localPrefix(appName) }
+
 // appNameSafe escapes every byte outside [A-Za-z0-9-] as _XX (two hex digits), including a
 // literal underscore, so the mapping is injective and its output never contains ".".
 func appNameSafe(s string) string {

@@ -6,11 +6,13 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/Busness-app/ky-primitives/capsule"
 )
 
 func TestDrillOpensWhatItSealedAndWipesScratch(t *testing.T) {
 	var seen string
-	res, err := Drill(context.Background(), t.TempDir(), testPayload(), func(dir string) []Check {
+	res, err := Drill(context.Background(), t.TempDir(), testPayload(), func(dir string, _ capsule.Manifest) []Check {
 		seen = dir
 		b, err := os.ReadFile(filepath.Join(dir, "data", "app.db"))
 		info, _ := os.Stat(dir)
@@ -25,7 +27,7 @@ func TestDrillOpensWhatItSealedAndWipesScratch(t *testing.T) {
 }
 
 func TestDrillFailsWhenAProductCheckFails(t *testing.T) {
-	res, err := Drill(context.Background(), t.TempDir(), testPayload(), func(string) []Check {
+	res, err := Drill(context.Background(), t.TempDir(), testPayload(), func(string, capsule.Manifest) []Check {
 		return []Check{{Name: "admin", Passed: false, Message: "no active admin"}}
 	})
 	if err != nil || res.Passed || res.ErrorMessage != "admin: no active admin" {
@@ -53,7 +55,7 @@ func TestDrillUsesTheCallerScratchRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	var seen string
-	res, err := Drill(context.Background(), root, testPayload(), func(dir string) []Check {
+	res, err := Drill(context.Background(), root, testPayload(), func(dir string, _ capsule.Manifest) []Check {
 		seen = dir
 		return []Check{{Name: "ok", Passed: true}}
 	})
@@ -71,5 +73,28 @@ func TestDrillUsesTheCallerScratchRoot(t *testing.T) {
 	}
 	if _, err := Drill(context.Background(), "", testPayload(), nil); err != ErrNoScratchRoot {
 		t.Errorf("empty root: %v", err)
+	}
+}
+
+// The recipe reaches the checks as the opened capsule carries it, JSON types and all, so a
+// drill exercises the same shape a real restore reads.
+func TestDrillHandsChecksTheOpenedManifest(t *testing.T) {
+	p := testPayload()
+	p.VerificationRecipe = map[string]any{"required_files": []string{"data/app.db", "../escape"}, "check": true}
+	var got capsule.Manifest
+	res, err := Drill(context.Background(), t.TempDir(), p, func(_ string, m capsule.Manifest) []Check {
+		got = m
+		return []Check{{Name: "ok", Passed: true}}
+	})
+	if err != nil || !res.Passed {
+		t.Fatalf("%v %+v", err, res)
+	}
+	recipe, ok := got.VerificationRecipe.(map[string]any)
+	if !ok || got.ServiceName != "Svc" {
+		t.Fatalf("manifest %+v", got)
+	}
+	files, ok := recipe["required_files"].([]any)
+	if !ok || len(files) != 2 || files[0] != "data/app.db" || files[1] != "../escape" {
+		t.Fatalf("recipe after the round trip is %T %v; checks must handle the JSON shape", recipe["required_files"], recipe["required_files"])
 	}
 }

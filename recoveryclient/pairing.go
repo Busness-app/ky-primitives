@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // Settings keys. The token lives under its own key so a value written by an older build,
@@ -38,6 +39,7 @@ type Pairing struct {
 // StorePairing records the server URL and the bearer token after StoreRecoveryKey has pinned
 // the key. The token is sealed by the product's Sealer before it reaches the row.
 func StorePairing(settings Settings, sealer Sealer, serverURL, token string) error {
+	token = strings.TrimSpace(token)
 	if token == "" {
 		return errors.New("recoveryclient: refusing to store an empty KyRecovery token")
 	}

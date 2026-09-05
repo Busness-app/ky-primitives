@@ -1,5 +1,4 @@
 **Repo:** ky-primitives
-**Worktree:** /home/yoshi/busness.app/ky-primitives (branch master)
 
 # ky-primitives/offsite implementation plan
 
