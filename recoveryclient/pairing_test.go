@@ -12,8 +12,10 @@ func (f fatalSealer) Seal(b []byte) (string, error) { return string(b), nil }
 func (f fatalSealer) Open(string) ([]byte, error)   { f.t.Fatal("Open called"); return nil, nil }
 
 func TestStorePairingRefusesEmptyToken(t *testing.T) {
-	if err := StorePairing(memSettings{}, testSealer(t), "https://r.test", ""); err == nil {
-		t.Fatal("empty token stored")
+	for _, tok := range []string{"", "  ", "\n\t"} {
+		if err := StorePairing(memSettings{}, testSealer(t), "https://r.test", tok); err == nil {
+			t.Fatalf("token %q stored", tok)
+		}
 	}
 }
 

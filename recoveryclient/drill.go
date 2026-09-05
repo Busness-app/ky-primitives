@@ -44,7 +44,7 @@ var ErrNoScratchRoot = errors.New("recoveryclient: drill needs a scratch root in
 // Stale scratch directories left under scratchRoot by a killed drill are removed first. The
 // suite key is never involved, so a passing drill says the format restores, not that the
 // custodians' cards do; that is what the product's restore runbook is for.
-func Drill(ctx context.Context, scratchRoot string, payload Payload, checks func(dir string) []Check) (*DrillResult, error) {
+func Drill(ctx context.Context, scratchRoot string, payload Payload, checks func(dir string, opened capsule.Manifest) []Check) (*DrillResult, error) {
 	if scratchRoot == "" {
 		return nil, ErrNoScratchRoot
 	}
@@ -106,7 +106,7 @@ func Drill(ctx context.Context, scratchRoot string, payload Payload, checks func
 	}
 	pass("Directory Unpack", fmt.Sprintf("%d files extracted into a 0700 sandbox", len(files)))
 	if checks != nil {
-		result.Checks = append(result.Checks, checks(dir)...)
+		result.Checks = append(result.Checks, checks(dir, opened)...)
 	}
 	return finish()
 }
